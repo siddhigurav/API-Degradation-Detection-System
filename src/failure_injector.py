@@ -1,3 +1,11 @@
+"""
+Failure Injection Script
+
+Simulates silent API degradation scenarios: gradual latency, partial timeouts, response size inflation.
+Logs injected failures to data/injections.jsonl for analysis.
+Measures detection latency via demo_marker and alerts.
+"""
+
 import time
 import random
 import requests
@@ -9,6 +17,23 @@ INGEST_URL = 'http://localhost:8000/ingest'
 BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
 RAW_LOGS = os.path.join(DATA_DIR, 'raw_logs.jsonl')
+INJECTIONS_LOG = os.path.join(DATA_DIR, 'injections.jsonl')
+
+
+def log_injection(scenario, endpoint, details):
+    """Log each injection for analysis."""
+    rec = {
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'scenario': scenario,
+        'endpoint': endpoint,
+        'details': details,
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(INJECTIONS_LOG, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(rec) + '\n')
+    except Exception:
+        pass
 
 
 def send_log(endpoint='/checkout', status=200, latency=100.0, size=1024, err=None):
@@ -33,6 +58,7 @@ def send_log(endpoint='/checkout', status=200, latency=100.0, size=1024, err=Non
 
 
 def gradual_latency(endpoint='/checkout', start=100, end=2000, steps=60, interval=1.0):
+    log_injection('gradual_latency', endpoint, {'start_latency': start, 'end_latency': end, 'steps': steps, 'interval': interval})
     step = (end - start) / max(1, steps)
     cur = start
     for i in range(steps):
@@ -42,6 +68,7 @@ def gradual_latency(endpoint='/checkout', start=100, end=2000, steps=60, interva
 
 
 def partial_timeouts(endpoint='/search', total=60, p_timeout=0.1, interval=1.0):
+    log_injection('partial_timeouts', endpoint, {'total_requests': total, 'timeout_prob': p_timeout, 'interval': interval})
     for i in range(total):
         if random.random() < p_timeout:
             send_log(endpoint=endpoint, latency=3000, status=504, size=0, err='timeout')
@@ -51,6 +78,7 @@ def partial_timeouts(endpoint='/search', total=60, p_timeout=0.1, interval=1.0):
 
 
 def response_size_inflation(endpoint='/items', factor=5, bursts=10, interval=2.0):
+    log_injection('response_size_inflation', endpoint, {'size_factor': factor, 'bursts': bursts, 'interval': interval})
     for i in range(bursts):
         send_log(endpoint=endpoint, latency=120, status=200, size=1000 * factor)
         time.sleep(interval)

@@ -1,3 +1,21 @@
+"""
+Explainable Anomaly Detection Module
+
+Uses EWMA (for slow drifts) and Z-Score (for sudden spikes) per endpoint.
+Trains on historical aggregates per metric.
+Detects deviations with configurable thresholds.
+Justification: reasons include z-score, pct-change, ewma-deviation.
+
+Threshold Logic:
+- Z-Score > 3.0: Sudden spike/outlier.
+- Pct Change > 25%: Significant change.
+- EWMA Deviation > 0.2: Slow drift (current - ewma_mean) / ewma_std > 0.2.
+- Demo threshold: avg_latency > 400ms for testing.
+
+Example Input: List of new aggregates (from aggregator).
+Example Output: Dict of detections with flagged metrics and reasons.
+"""
+
 import os
 import json
 import math
@@ -11,6 +29,7 @@ AGG_LOGS = os.path.join(DATA_DIR, 'aggregates.jsonl')
 # Configurable thresholds (engineer-tunable)
 Z_SCORE_THRESHOLD = 3.0
 PCT_CHANGE_THRESHOLD = 0.25  # 25% change flagged
+EWMA_DEVIATION_THRESHOLD = 0.2  # Deviation from EWMA mean in std units
 MIN_VOLUME_FOR_STATS = 5
 
 
@@ -38,7 +57,7 @@ def detect(aggregates: List[Dict[str, Any]]):
     """
     Input: newest aggregate records (list of per-endpoint dicts for one run)
     Output: detections: dict endpoint -> list of metric detections
-    Each detection: {metric, value, baseline_mean, baseline_std, z_score, pct_change}
+    Each detection: {metric, value, baseline_mean, baseline_std, z_score, pct_change, ewma_mean, ewma_std, ewma_dev, flagged, reasons}
     """
     detections = {}
     if not aggregates:
@@ -62,6 +81,18 @@ def detect(aggregates: List[Dict[str, Any]]):
             else:
                 z = float('nan')
             pct_change = (cur - baseline_mean) / baseline_mean if (baseline_mean and not math.isnan(baseline_mean)) else float('nan')
+            # Compute EWMA for drift detection
+            ewma_mean = float('nan')
+            ewma_std = float('nan')
+            ewma_dev = float('nan')
+            if not hist.empty and len(hist) > 1:
+                # Sort by time for EWMA
+                hist_sorted = hist.sort_values('window_end')
+                ewma_series = hist_sorted[metric].ewm(span=10).mean()  # span=10 for smoothing
+                ewma_mean = ewma_series.iloc[-1]  # Latest EWMA
+                ewma_std = hist_sorted[metric].ewm(span=10).std().iloc[-1] if len(hist_sorted) > 1 else 0.0
+                if not math.isnan(ewma_std) and ewma_std > 0:
+                    ewma_dev = (cur - ewma_mean) / ewma_std
             flagged = False
             reasons = []
             if not math.isnan(z) and abs(z) >= Z_SCORE_THRESHOLD:
@@ -70,6 +101,9 @@ def detect(aggregates: List[Dict[str, Any]]):
             if not math.isnan(pct_change) and abs(pct_change) >= PCT_CHANGE_THRESHOLD:
                 flagged = True
                 reasons.append(f'pct={pct_change*100:.1f}%')
+            if not math.isnan(ewma_dev) and abs(ewma_dev) >= EWMA_DEVIATION_THRESHOLD:
+                flagged = True
+                reasons.append(f'ewma_dev={ewma_dev:.2f}')
             # Demo: simple threshold for avg_latency
             if metric == 'avg_latency' and cur > 400:
                 flagged = True
@@ -85,6 +119,9 @@ def detect(aggregates: List[Dict[str, Any]]):
                 'baseline_std': baseline_std,
                 'z_score': z,
                 'pct_change': pct_change,
+                'ewma_mean': ewma_mean,
+                'ewma_std': ewma_std,
+                'ewma_dev': ewma_dev,
                 'flagged': flagged and vol_ok,
                 'reasons': reasons,
                 'window_minutes': w,

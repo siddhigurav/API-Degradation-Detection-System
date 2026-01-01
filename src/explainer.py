@@ -1,3 +1,14 @@
+"""
+Explanation Generator
+
+Converts anomaly data into human-readable alert messages.
+Includes metric deltas (current vs baseline), baselines, time windows, and stable metrics.
+
+Example Input: endpoint="/checkout", triggered_metrics=[{"metric": "avg_latency", "value": 500, "baseline_mean": 120, "pct_change": 3.17, "window_minutes": 15}]
+
+Example Output: "avg latency for /checkout increased to 500ms (from baseline 120ms, +317%) over 15 minutes while error_rate and response_size_variance stayed stable."
+"""
+
 from typing import List, Dict, Any
 
 METRIC_READABLE = {
@@ -8,37 +19,59 @@ METRIC_READABLE = {
     'response_size_variance': 'response size variance',
 }
 
+ALL_METRICS = set(METRIC_READABLE.keys())
+
 
 def explain(endpoint: str, triggered_metrics: List[Dict[str, Any]]):
     """
     Build a human-readable explanation for an alert.
-    Example:
-    “p95 latency for /checkout increased 41% over 15 minutes while request volume stayed stable.”
+    Includes deltas, baselines, time windows, and stable metrics.
     """
+    if not triggered_metrics:
+        return f"No anomalies detected for {endpoint}."
+
     parts = []
     window = triggered_metrics[0].get('window_minutes') if triggered_metrics else None
     for m in triggered_metrics:
         name = METRIC_READABLE.get(m['metric'], m['metric'])
+        value = m.get('value')
+        baseline = m.get('baseline_mean')
         pct = m.get('pct_change')
-        reason = ''
-        if pct is not None and not (isinstance(pct, float) and (pct != pct)):
-            try:
-                reason = f"increased {abs(pct)*100:.1f}%" if pct > 0 else f"decreased {abs(pct)*100:.1f}%"
-            except Exception:
-                reason = ''
+        delta = ''
+        if value is not None and baseline is not None and not (isinstance(baseline, float) and (baseline != baseline)):
+            if m['metric'] in ['avg_latency', 'p95_latency']:
+                delta = f"to {value:.1f}ms (from baseline {baseline:.1f}ms"
+            elif m['metric'] == 'error_rate':
+                delta = f"to {value:.3f} (from baseline {baseline:.3f}"
+            elif m['metric'] == 'request_volume':
+                delta = f"to {int(value)} (from baseline {baseline:.1f}"
+            else:
+                delta = f"to {value:.1f} (from baseline {baseline:.1f}"
+            if pct is not None and not (isinstance(pct, float) and (pct != pct)):
+                sign = '+' if pct > 0 else ''
+                delta += f", {sign}{pct*100:.1f}%)"
+            else:
+                delta += ")"
+        elif pct is not None and not (isinstance(pct, float) and (pct != pct)):
+            sign = '+' if pct > 0 else ''
+            delta = f"{sign}{pct*100:.1f}%"
         elif 'z_score' in m:
             z = m.get('z_score')
             if z is not None and not (isinstance(z, float) and (z != z)):
-                reason = f"z-score {z:.2f}"
-        parts.append(f"{name} {reason}".strip())
-    # Simple heuristic: check request_volume metric presence to comment on volume
-    volume_metrics = [m for m in triggered_metrics if m['metric'] == 'request_volume']
-    volume_note = ''
-    if not volume_metrics:
-        volume_note = 'request volume stayed stable.'
-    else:
-        volume_note = 'request volume changed.'
-    explanation = f"{'; '.join(parts)} for {endpoint} over {window} minute(s) while {volume_note}"
+                delta = f"z-score {z:.2f}"
+        parts.append(f"{name} {delta}".strip())
+
+    # Identify stable metrics (not in triggered)
+    triggered_set = set(m['metric'] for m in triggered_metrics)
+    stable = [METRIC_READABLE[m] for m in ALL_METRICS - triggered_set]
+    stable_note = ''
+    if stable:
+        if len(stable) == 1:
+            stable_note = f" while {stable[0]} stayed stable."
+        else:
+            stable_note = f" while {', '.join(stable[:-1])} and {stable[-1]} stayed stable."
+
+    explanation = f"{'; '.join(parts)} for {endpoint} over {window} minute(s){stable_note}"
     return explanation
 
 

@@ -10,14 +10,7 @@ POLL_INTERVAL = 15  # seconds
 
 
 def severity_from_metrics(triggered_metrics):
-    # Simple heuristic
-    for m in triggered_metrics:
-        if m['metric'] == 'error_rate' and m.get('value', 0) > 0.1:
-            return 'CRITICAL'
-        if m['metric'] in ('p95_latency', 'avg_latency'):
-            pct = m.get('pct_change')
-            if pct and pct > 0.5:
-                return 'CRITICAL'
+    # Deprecated: severity now handled in alerter.py
     return 'WARN'
 
 
@@ -38,7 +31,6 @@ def run_loop():
                 severity = severity_from_metrics(triggered)
                 alert_obj = {
                     'endpoint': endpoint,
-                    'severity': severity,
                     'explanation': explanation,
                     'timestamp_range': {
                         'end': now.isoformat() + 'Z',

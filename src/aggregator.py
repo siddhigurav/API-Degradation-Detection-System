@@ -1,3 +1,19 @@
+"""
+Log Aggregation Module
+
+This module reads ingested API logs from data/raw_logs.jsonl and computes rolling window aggregates
+(1m, 5m, 15m) per endpoint. It uses efficient time bucketing via pandas filtering and grouping.
+
+Output: Structured metrics per endpoint-window, suitable for anomaly detection (e.g., avg_latency, p95_latency, etc.).
+
+Example Input (raw_logs.jsonl lines):
+{"timestamp": "2026-01-01T10:00:00Z", "endpoint": "/checkout", "status_code": 200, "latency_ms": 120, "response_size": 1024}
+{"timestamp": "2026-01-01T10:00:30Z", "endpoint": "/checkout", "status_code": 500, "latency_ms": 500, "response_size": 512}
+
+Example Output (aggregates.jsonl lines):
+{"endpoint": "/checkout", "window_minutes": 1, "window_end": "2026-01-01T10:01:00Z", "avg_latency": 310.0, "p95_latency": 500.0, "error_rate": 0.5, "request_volume": 2, "response_size_variance": 0.0}
+"""
+
 import os
 import json
 from datetime import datetime, timedelta
@@ -32,6 +48,10 @@ def read_raw_logs():
 
 
 def compute_aggregates(now=None):
+    """
+    Compute aggregates for each window per endpoint.
+    Uses efficient filtering: only logs within the window are processed.
+    """
     now = now or datetime.utcnow()
     df = read_raw_logs()
     if df.empty:
