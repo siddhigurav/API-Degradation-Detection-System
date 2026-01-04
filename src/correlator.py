@@ -39,24 +39,43 @@ from typing import Dict, List, Any
 MIN_SIGNALS = 2
 
 
-def correlate(detections: Dict[str, List[Dict[str, Any]]]):
+def correlate(anomalies: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """
-    detections: endpoint -> list of metric detection dicts (from detector.detect)
-    Returns: actionable_alerts: dict endpoint -> {window_minutes, triggered_metrics}
+    anomalies: List of anomaly dicts from detector.detect (simplified format)
+    Returns: actionable_alerts: dict endpoint -> {window, triggered_anomalies}
+    Requires at least MIN_SIGNALS anomalies for the same endpoint+window to be actionable.
     """
     actionable = {}
-    for endpoint, dets in detections.items():
-        # count flagged independent signals
-        flagged = [d for d in dets if d.get('flagged')]
-        # ensure independence by metric name
-        metrics = set(d['metric'] for d in flagged)
-        if len(metrics) >= MIN_SIGNALS:
-            # choose the most recent window_minutes among flagged
-            window_minutes = max(d.get('window_minutes', 0) for d in flagged)
+
+    # Group anomalies by endpoint and window
+    endpoint_window_groups = {}
+    for anomaly in anomalies:
+        endpoint = anomaly['endpoint']
+        window = anomaly['window']
+        key = f"{endpoint}:{window}"
+        if key not in endpoint_window_groups:
+            endpoint_window_groups[key] = []
+        endpoint_window_groups[key].append(anomaly)
+
+    # Check each endpoint+window group for sufficient signals
+    for key, group_anomalies in endpoint_window_groups.items():
+        endpoint, window = key.split(':', 1)
+
+        # Ensure we have at least MIN_SIGNALS independent anomalies
+        if len(group_anomalies) >= MIN_SIGNALS:
+            # Sort by severity (CRITICAL > HIGH > MEDIUM > LOW)
+            severity_order = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+            sorted_anomalies = sorted(group_anomalies,
+                                    key=lambda x: severity_order.get(x.get('severity', 'LOW'), 0),
+                                    reverse=True)
+
             actionable[endpoint] = {
-                'window_minutes': window_minutes,
-                'triggered_metrics': [d for d in flagged],
+                'window': window,
+                'triggered_anomalies': sorted_anomalies,
+                'severity': sorted_anomalies[0]['severity'],  # Highest severity
+                'anomaly_count': len(sorted_anomalies)
             }
+
     return actionable
 
 

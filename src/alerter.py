@@ -22,20 +22,21 @@ DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
 ALERTS_FILE = os.path.join(DATA_DIR, 'alerts.jsonl')
 
 
-def classify_severity(triggered_metrics: List[Dict[str, Any]]) -> str:
+def classify_severity(anomalies: List[Dict[str, Any]]) -> str:
     """
-    Classify alert severity based on triggered metrics.
+    Classify alert severity based on anomalies.
     """
-    if not triggered_metrics:
+    if not anomalies:
         return 'INFO'
     
-    num_signals = len(triggered_metrics)
-    has_high_error = any(m.get('metric') == 'error_rate' and m.get('value', 0) > 0.1 for m in triggered_metrics)
-    has_high_latency = any(m.get('metric') in ['avg_latency', 'p95_latency'] and m.get('pct_change', 0) > 1.0 for m in triggered_metrics)
+    num_signals = len(anomalies)
+    has_high_error = any(a.get('metric') == 'error_rate' and a.get('current_value', 0) > 0.1 for a in anomalies)
+    has_high_latency = any(a.get('metric') in ['avg_latency', 'p95_latency'] and abs(a.get('deviation', 0)) > 3.0 for a in anomalies)
+    has_critical_severity = any(a.get('severity') == 'CRITICAL' for a in anomalies)
     
-    if has_high_error or has_high_latency or num_signals > 3:
+    if has_high_error or has_high_latency or num_signals > 3 or has_critical_severity:
         return 'CRITICAL'
-    elif any(m.get('metric') in ['avg_latency', 'p95_latency'] and m.get('pct_change', 0) > 0.5 for m in triggered_metrics) or num_signals > 2:
+    elif any(a.get('metric') in ['avg_latency', 'p95_latency'] and abs(a.get('deviation', 0)) > 2.0 for a in anomalies) or num_signals > 2:
         return 'WARN'
     else:
         return 'INFO'
@@ -63,8 +64,8 @@ def send_slack(alert: Dict[str, Any]):
 def alert(alert_obj: Dict[str, Any]):
     # Classify severity if not set
     if 'severity' not in alert_obj:
-        triggered = alert_obj.get('triggered_metrics', [])
-        alert_obj['severity'] = classify_severity(triggered)
+        anomalies = alert_obj.get('anomalies', [])
+        alert_obj['severity'] = classify_severity(anomalies)
     
     # always print to console
     send_console(alert_obj)

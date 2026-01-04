@@ -22,57 +22,100 @@ METRIC_READABLE = {
 ALL_METRICS = set(METRIC_READABLE.keys())
 
 
-def explain(endpoint: str, triggered_metrics: List[Dict[str, Any]]):
+def explain(endpoint: str, anomalies: List[Dict[str, Any]]) -> str:
     """
-    Build a human-readable explanation for an alert.
-    Includes deltas, baselines, time windows, and stable metrics.
+    Generate natural language explanation for API degradation alerts.
+    Includes metrics involved, direction & magnitude, time window, and stable signals.
     """
-    if not triggered_metrics:
+    if not anomalies:
         return f"No anomalies detected for {endpoint}."
 
+    # Group anomalies by type for better narrative flow
+    latency_anomalies = [a for a in anomalies if a['metric'] in ['avg_latency', 'p95_latency']]
+    error_anomalies = [a for a in anomalies if a['metric'] == 'error_rate']
+    volume_anomalies = [a for a in anomalies if a['metric'] == 'request_volume']
+    variance_anomalies = [a for a in anomalies if a['metric'] == 'response_size_variance']
+
+    window = anomalies[0].get('window', 'unknown')
+
+    # Build the explanation narrative
     parts = []
-    window = triggered_metrics[0].get('window_minutes') if triggered_metrics else None
-    for m in triggered_metrics:
-        name = METRIC_READABLE.get(m['metric'], m['metric'])
-        value = m.get('value')
-        baseline = m.get('baseline_mean')
-        pct = m.get('pct_change')
-        delta = ''
-        if value is not None and baseline is not None and not (isinstance(baseline, float) and (baseline != baseline)):
-            if m['metric'] in ['avg_latency', 'p95_latency']:
-                delta = f"to {value:.1f}ms (from baseline {baseline:.1f}ms"
-            elif m['metric'] == 'error_rate':
-                delta = f"to {value:.3f} (from baseline {baseline:.3f}"
-            elif m['metric'] == 'request_volume':
-                delta = f"to {int(value)} (from baseline {baseline:.1f}"
-            else:
-                delta = f"to {value:.1f} (from baseline {baseline:.1f}"
-            if pct is not None and not (isinstance(pct, float) and (pct != pct)):
-                sign = '+' if pct > 0 else ''
-                delta += f", {sign}{pct*100:.1f}%)"
-            else:
-                delta += ")"
-        elif pct is not None and not (isinstance(pct, float) and (pct != pct)):
-            sign = '+' if pct > 0 else ''
-            delta = f"{sign}{pct*100:.1f}%"
-        elif 'z_score' in m:
-            z = m.get('z_score')
-            if z is not None and not (isinstance(z, float) and (z != z)):
-                delta = f"z-score {z:.2f}"
-        parts.append(f"{name} {delta}".strip())
 
-    # Identify stable metrics (not in triggered)
-    triggered_set = set(m['metric'] for m in triggered_metrics)
-    stable = [METRIC_READABLE[m] for m in ALL_METRICS - triggered_set]
-    stable_note = ''
-    if stable:
-        if len(stable) == 1:
-            stable_note = f" while {stable[0]} stayed stable."
-        else:
-            stable_note = f" while {', '.join(stable[:-1])} and {stable[-1]} stayed stable."
+    # Handle latency issues first (most critical)
+    if latency_anomalies:
+        latency_parts = []
+        for anomaly in latency_anomalies:
+            metric = anomaly['metric']
+            name = 'p95 latency' if metric == 'p95_latency' else 'average latency'
+            current = anomaly.get('current_value')
+            baseline = anomaly.get('baseline_mean')
 
-    explanation = f"{'; '.join(parts)} for {endpoint} over {window} minute(s){stable_note}"
-    return explanation
+            if current is not None and baseline is not None:
+                pct_change = ((current - baseline) / baseline) * 100
+                direction = "increased" if pct_change > 0 else "decreased"
+                latency_parts.append(f"{name} {direction} {abs(pct_change):.1f}% to {current:.1f}ms (from {baseline:.1f}ms)")
+
+        if latency_parts:
+            parts.append(" and ".join(latency_parts))
+
+    # Handle error rate
+    if error_anomalies:
+        anomaly = error_anomalies[0]  # Take the first/highest priority
+        current = anomaly.get('current_value')
+        baseline = anomaly.get('baseline_mean')
+
+        if current is not None and baseline is not None:
+            direction = "rose" if current > baseline else "fell"
+            parts.append(f"error rate {direction} from {baseline*100:.1f}% to {current*100:.1f}%")
+
+    # Handle request volume
+    if volume_anomalies:
+        anomaly = volume_anomalies[0]
+        current = anomaly.get('current_value')
+        baseline = anomaly.get('baseline_mean')
+
+        if current is not None and baseline is not None:
+            pct_change = ((current - baseline) / baseline) * 100
+            direction = "increased" if pct_change > 0 else "decreased"
+            parts.append(f"request volume {direction} {abs(pct_change):.1f}% to {int(current)} (from {baseline:.1f})")
+
+    # Handle response variance
+    if variance_anomalies:
+        anomaly = variance_anomalies[0]
+        current = anomaly.get('current_value')
+        baseline = anomaly.get('baseline_mean')
+
+        if current is not None and baseline is not None:
+            pct_change = ((current - baseline) / baseline) * 100
+            direction = "increased" if pct_change > 0 else "decreased"
+            parts.append(f"response size variance {direction} {abs(pct_change):.1f}%")
+
+    # Identify stable metrics
+    triggered_metrics = set(a['metric'] for a in anomalies)
+    stable_metrics = [METRIC_READABLE[m] for m in ALL_METRICS - triggered_metrics]
+
+    # Build the main explanation
+    if parts:
+        explanation = f"{' and '.join(parts)} for {endpoint} over {window}."
+
+        # Add stable signals
+        if stable_metrics:
+            if len(stable_metrics) == 1:
+                explanation += f" {stable_metrics[0].capitalize()} remained stable."
+            else:
+                explanation += f" {', '.join(stable_metrics[:-1])} and {stable_metrics[-1]} remained stable."
+
+        # Add interpretation based on the pattern
+        if latency_anomalies and error_anomalies and 'request_volume' not in triggered_metrics:
+            explanation += " This indicates backend degradation rather than a traffic surge."
+        elif latency_anomalies and 'request_volume' in triggered_metrics and 'error_rate' not in triggered_metrics:
+            explanation += " This suggests traffic-related performance issues."
+        elif error_anomalies and 'request_volume' not in triggered_metrics:
+            explanation += " This points to service reliability problems."
+
+        return explanation
+
+    return f"Anomalies detected for {endpoint} over {window}, but unable to generate detailed explanation."
 
 
 if __name__ == '__main__':

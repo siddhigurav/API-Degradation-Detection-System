@@ -1,71 +1,133 @@
 import React, { useState, useEffect } from 'react';
 
 function Metrics() {
-  const [endpoint, setEndpoint] = useState('/checkout');
-  const [window, setWindow] = useState(15);
   const [metrics, setMetrics] = useState([]);
 
   useEffect(() => {
-    if (endpoint) fetchMetrics();
-  }, [endpoint, window]);
+    fetchMetrics();
+  }, []);
 
   const fetchMetrics = async () => {
-    const url = `/metrics/${endpoint.replace('/', '')}?window=${window}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    setMetrics(data);
+    try {
+      const response = await fetch('/metrics//checkout?window=15');
+      const data = await response.json();
+      setMetrics(data);
+    } catch (error) {
+      console.error('Failed to fetch metrics:', error);
+    }
   };
 
-  const isAnomalous = (metric, value) => {
-    // Simple heuristic: highlight if value exceeds thresholds
-    const thresholds = {
-      avg_latency: 200,
-      p95_latency: 500,
-      error_rate: 0.05,
-      response_size_variance: 1000
+  // Simple line chart component
+  const LineChart = ({ data, width = 800, height = 300 }) => {
+    if (!data || data.length === 0) {
+      return (
+        <div style={{ width, height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6b7280' }}>
+          No data available
+        </div>
+      );
+    }
+
+    // Sort data by time
+    const sortedData = [...data].sort((a, b) => new Date(a.window_end) - new Date(b.window_end));
+
+    // Get p95 latency values
+    const values = sortedData.map(d => d.p95_latency || 0);
+    const maxValue = Math.max(...values);
+    const minValue = Math.min(...values);
+
+    // Chart dimensions
+    const padding = 60;
+    const chartWidth = width - padding * 2;
+    const chartHeight = height - padding * 2;
+
+    // Scale functions
+    const xScale = (index) => (index / (sortedData.length - 1)) * chartWidth + padding;
+    const yScale = (value) => chartHeight - ((value - minValue) / (maxValue - minValue)) * chartHeight + padding;
+
+    // Generate path
+    const pathData = sortedData.map((d, i) => {
+      const x = xScale(i);
+      const y = yScale(d.p95_latency || 0);
+      return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+    }).join(' ');
+
+    // Format time labels
+    const formatTime = (timestamp) => {
+      try {
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch {
+        return timestamp;
+      }
     };
-    return value > thresholds[metric];
+
+    return (
+      <svg width={width} height={height} style={{ backgroundColor: '#ffffff' }}>
+        {/* Grid lines */}
+        <defs>
+          <pattern id="grid" width="40" height="20" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 20" fill="none" stroke="#f3f4f6" strokeWidth="1"/>
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        {/* Y-axis labels */}
+        {[0, 0.25, 0.5, 0.75, 1].map(ratio => {
+          const value = minValue + (maxValue - minValue) * ratio;
+          const y = chartHeight - (ratio * chartHeight) + padding;
+          return (
+            <g key={ratio}>
+              <text x={padding - 10} y={y + 4} textAnchor="end" fontSize="12" fill="#6b7280">
+                {Math.round(value)}
+              </text>
+              <line x1={padding} y1={y} x2={width - padding} y2={y} stroke="#e5e7eb" strokeWidth="1" />
+            </g>
+          );
+        })}
+
+        {/* X-axis labels */}
+        {sortedData.map((d, i) => {
+          if (i % Math.ceil(sortedData.length / 5) === 0) {
+            const x = xScale(i);
+            return (
+              <text key={i} x={x} y={height - padding + 20} textAnchor="middle" fontSize="12" fill="#6b7280">
+                {formatTime(d.window_end)}
+              </text>
+            );
+          }
+          return null;
+        })}
+
+        {/* Line */}
+        <path
+          d={pathData}
+          fill="none"
+          stroke="#2563eb"
+          strokeWidth="2"
+        />
+
+        {/* Data points */}
+        {sortedData.map((d, i) => (
+          <circle
+            key={i}
+            cx={xScale(i)}
+            cy={yScale(d.p95_latency || 0)}
+            r="3"
+            fill="#2563eb"
+          />
+        ))}
+      </svg>
+    );
   };
 
   return (
-    <div>
+    <section className="metrics-section">
       <h2>Endpoint Metrics</h2>
-      <input
-        type="text"
-        value={endpoint}
-        onChange={(e) => setEndpoint(e.target.value)}
-        placeholder="Enter endpoint, e.g., /checkout"
-      />
-      <select value={window} onChange={(e) => setWindow(Number(e.target.value))}>
-        <option value={1}>1m</option>
-        <option value={5}>5m</option>
-        <option value={15}>15m</option>
-      </select>
-      <table>
-        <thead>
-          <tr>
-            <th>Window End</th>
-            <th>Avg Latency</th>
-            <th>P95 Latency</th>
-            <th>Error Rate</th>
-            <th>Request Volume</th>
-            <th>Response Size Variance</th>
-          </tr>
-        </thead>
-        <tbody>
-          {metrics.map((m, index) => (
-            <tr key={index}>
-              <td>{m.window_end}</td>
-              <td className={isAnomalous('avg_latency', m.avg_latency) ? 'anomalous' : ''}>{m.avg_latency?.toFixed(2)}</td>
-              <td className={isAnomalous('p95_latency', m.p95_latency) ? 'anomalous' : ''}>{m.p95_latency?.toFixed(2)}</td>
-              <td className={isAnomalous('error_rate', m.error_rate) ? 'anomalous' : ''}>{m.error_rate?.toFixed(3)}</td>
-              <td>{m.request_volume}</td>
-              <td className={isAnomalous('response_size_variance', m.response_size_variance) ? 'anomalous' : ''}>{m.response_size_variance?.toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+      <div className="metrics-subtitle">p95 latency</div>
+      <div className="chart-container">
+        <LineChart data={metrics} />
+      </div>
+    </section>
   );
 }
 

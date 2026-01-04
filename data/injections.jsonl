@@ -1,1 +1,0 @@
-{"timestamp": "2026-01-01T20:31:34.608489Z", "scenario": "gradual_latency", "endpoint": "/checkout", "details": {"start_latency": 120, "end_latency": 1500, "steps": 30, "interval": 0.5}}

@@ -2,49 +2,81 @@ import React, { useState, useEffect } from 'react';
 
 function Alerts() {
   const [alerts, setAlerts] = useState([]);
-  const [severity, setSeverity] = useState('');
 
   useEffect(() => {
     fetchAlerts();
-  }, [severity]);
+  }, []);
 
   const fetchAlerts = async () => {
-    const url = severity ? `/alerts?severity=${severity}` : '/alerts';
-    const response = await fetch(url);
-    const data = await response.json();
-    setAlerts(data);
+    try {
+      const response = await fetch('/alerts');
+      const data = await response.json();
+      setAlerts(data);
+    } catch (error) {
+      console.error('Failed to fetch alerts:', error);
+    }
+  };
+
+  const getSeverityClass = (severity) => {
+    switch (severity?.toLowerCase()) {
+      case 'critical':
+        return 'critical';
+      case 'warn':
+      case 'warning':
+        return 'warn';
+      case 'info':
+        return 'info';
+      default:
+        return 'info';
+    }
+  };
+
+  const formatTime = (timestamp) => {
+    if (!timestamp) return 'N/A';
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleString();
+    } catch {
+      return timestamp;
+    }
   };
 
   return (
-    <div>
+    <section>
       <h2>Alerts</h2>
-      <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
-        <option value="">All</option>
-        <option value="INFO">INFO</option>
-        <option value="WARN">WARN</option>
-        <option value="CRITICAL">CRITICAL</option>
-      </select>
-      <table>
+      <table className="alerts-table">
         <thead>
           <tr>
-            <th>Endpoint</th>
             <th>Severity</th>
+            <th>Endpoint</th>
             <th>Explanation</th>
-            <th>Time Range</th>
+            <th>Time</th>
           </tr>
         </thead>
         <tbody>
-          {alerts.map((alert, index) => (
-            <tr key={index}>
-              <td>{alert.endpoint}</td>
-              <td className={`severity-${alert.severity}`}>{alert.severity}</td>
-              <td>{alert.explanation}</td>
-              <td>{alert.timestamp_range?.end} ({alert.timestamp_range?.minutes}m)</td>
+          {alerts.length === 0 ? (
+            <tr>
+              <td colSpan="4" style={{ textAlign: 'center', padding: '32px', color: '#6b7280' }}>
+                No alerts found
+              </td>
             </tr>
-          ))}
+          ) : (
+            alerts.map((alert, index) => (
+              <tr key={index}>
+                <td>
+                  <span className={`severity-badge ${getSeverityClass(alert.severity)}`}>
+                    {alert.severity || 'INFO'}
+                  </span>
+                </td>
+                <td>{alert.endpoint || 'N/A'}</td>
+                <td>{alert.explanation || 'No explanation available'}</td>
+                <td>{formatTime(alert.timestamp_range?.end || alert.timestamp)}</td>
+              </tr>
+            ))
+          )}
         </tbody>
       </table>
-    </div>
+    </section>
   );
 }
 

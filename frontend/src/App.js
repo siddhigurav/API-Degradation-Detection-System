@@ -9,7 +9,7 @@ function App() {
     <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <div className="App">
         <header className="App-header">
-          <h1>Explainable Early-Warning System for API Degradation</h1>
+          <h1>API Degradation Detection System</h1>
           <nav>
             <Link to="/alerts">Alerts</Link> | <Link to="/metrics">Metrics</Link>
           </nav>

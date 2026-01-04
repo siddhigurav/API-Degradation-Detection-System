@@ -43,7 +43,34 @@ async def get_alerts(severity: Optional[str] = Query(None, description="Filter b
     alerts = read_jsonl(ALERTS_FILE)
     if severity:
         alerts = [a for a in alerts if a.get('severity') == severity]
+    
+    # Add metrics_involved field to each alert
+    for alert in alerts:
+        if 'anomalies' in alert:
+            alert['metrics_involved'] = [a.get('metric') for a in alert['anomalies']]
+        else:
+            alert['metrics_involved'] = []
+    
     return alerts
+
+@app.get('/alerts/{alert_id}', response_model=dict)
+async def get_alert(alert_id: int):
+    alerts = read_jsonl(ALERTS_FILE)
+    if alert_id < 0 or alert_id >= len(alerts):
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    alert = alerts[alert_id].copy()
+    
+    # Add metrics_involved field
+    if 'anomalies' in alert:
+        alert['metrics_involved'] = [a.get('metric') for a in alert['anomalies']]
+    else:
+        alert['metrics_involved'] = []
+    
+    # Add alert_id to the response
+    alert['alert_id'] = alert_id
+    
+    return alert
 
 @app.get('/metrics/{endpoint}', response_model=List[dict])
 async def get_metrics(endpoint: str, window: Optional[int] = Query(None, description="Filter by window minutes: 1, 5, 15")):
@@ -68,3 +95,7 @@ async def ingest(log: LogEntry):
 @app.get('/health')
 async def health():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)

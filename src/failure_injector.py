@@ -1,91 +1,192 @@
 """
-Failure Injection Script
+Failure Injection Simulator
 
-Simulates silent API degradation scenarios: gradual latency, partial timeouts, response size inflation.
-Logs injected failures to data/injections.jsonl for analysis.
-Measures detection latency via demo_marker and alerts.
+This script simulates realistic API traffic patterns for the EWS system:
+- Normal baseline traffic
+- Gradual latency degradation
+- Error rate spikes
+- Recovery periods
+
+Sends logs to the /ingest API endpoint in real-time.
 """
 
 import time
 import random
-import requests
-import os
+import httpx
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
 
-INGEST_URL = 'http://localhost:8000/ingest'
-BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
-RAW_LOGS = os.path.join(DATA_DIR, 'raw_logs.jsonl')
-INJECTIONS_LOG = os.path.join(DATA_DIR, 'injections.jsonl')
+# Configuration
+API_BASE_URL = "http://localhost:8001"
+INGEST_ENDPOINT = f"{API_BASE_URL}/ingest"
 
+# Traffic simulation parameters
+ENDPOINTS = ["/checkout", "/api/users", "/api/orders", "/api/products"]
+BASE_LATENCY = 120  # ms
+BASE_ERROR_RATE = 0.02  # 2%
+REQUESTS_PER_SECOND = 2  # baseline load
 
-def log_injection(scenario, endpoint, details):
-    """Log each injection for analysis."""
-    rec = {
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
-        'scenario': scenario,
-        'endpoint': endpoint,
-        'details': details,
-    }
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(INJECTIONS_LOG, 'a', encoding='utf-8') as fh:
-            fh.write(json.dumps(rec) + '\n')
-    except Exception:
-        pass
+class FailureInjector:
+    def __init__(self):
+        self.client = httpx.Client(timeout=5.0)
+        self.current_phase = "normal"
+        self.phase_start_time = time.time()
+        self.latency_multiplier = 1.0
+        self.error_rate_multiplier = 1.0
 
+    def generate_log_entry(self, endpoint: str, timestamp: datetime) -> Dict[str, Any]:
+        """Generate a single log entry with current failure injection parameters."""
 
-def send_log(endpoint='/checkout', status=200, latency=100.0, size=1024, err=None):
-    payload = {
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
-        'endpoint': endpoint,
-        'status_code': status,
-        'latency_ms': latency,
-        'response_size': size,
-        'error_message': err,
-    }
-    try:
-        requests.post(INGEST_URL, json=payload, timeout=2)
-    except Exception:
-        # fallback: write directly to raw logs so the demo can run without a live ingest service
+        # Apply current failure injection
+        latency = int(BASE_LATENCY * self.latency_multiplier)
+        latency += random.randint(-20, 20)  # natural variation
+
+        # Error injection
+        is_error = random.random() < (BASE_ERROR_RATE * self.error_rate_multiplier)
+        status_code = 500 if is_error else 200
+        error_message = "Internal Server Error" if is_error else None
+
+        # Response size variation
+        response_size = 900 + random.randint(-100, 200)
+
+        return {
+            "timestamp": timestamp.isoformat() + "Z",
+            "endpoint": endpoint,
+            "status_code": status_code,
+            "latency_ms": max(10, latency),  # minimum 10ms
+            "response_size": response_size,
+            "error_message": error_message,
+        }
+
+    def send_log(self, log_entry: Dict[str, Any]) -> bool:
+        """Send a log entry to the ingest API."""
         try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(RAW_LOGS, 'a', encoding='utf-8') as fh:
-                fh.write(json.dumps(payload) + '\n')
-        except Exception:
-            pass
+            response = self.client.post(INGEST_ENDPOINT, json=log_entry)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Failed to send log: {e}")
+            return False
 
+    def update_failure_conditions(self, elapsed: float):
+        """Update failure injection parameters based on simulation phase."""
 
-def gradual_latency(endpoint='/checkout', start=100, end=2000, steps=60, interval=1.0):
-    log_injection('gradual_latency', endpoint, {'start_latency': start, 'end_latency': end, 'steps': steps, 'interval': interval})
-    step = (end - start) / max(1, steps)
-    cur = start
-    for i in range(steps):
-        send_log(endpoint=endpoint, latency=cur, status=200, size=1000)
-        cur += step
-        time.sleep(interval)
+        if elapsed < 60:  # First minute: Normal traffic
+            self.current_phase = "normal"
+            self.latency_multiplier = 1.0
+            self.error_rate_multiplier = 1.0
 
+        elif elapsed < 180:  # Next 2 minutes: Gradual latency degradation
+            self.current_phase = "latency_degradation"
+            # Linear increase from 1.0 to 3.0 over 2 minutes
+            progress = (elapsed - 60) / 120
+            self.latency_multiplier = 1.0 + (progress * 2.0)
+            self.error_rate_multiplier = 1.0
 
-def partial_timeouts(endpoint='/search', total=60, p_timeout=0.1, interval=1.0):
-    log_injection('partial_timeouts', endpoint, {'total_requests': total, 'timeout_prob': p_timeout, 'interval': interval})
-    for i in range(total):
-        if random.random() < p_timeout:
-            send_log(endpoint=endpoint, latency=3000, status=504, size=0, err='timeout')
-        else:
-            send_log(endpoint=endpoint, latency=120, status=200, size=800)
-        time.sleep(interval)
+        elif elapsed < 240:  # Next minute: Error spike
+            self.current_phase = "error_spike"
+            self.latency_multiplier = 2.5  # Keep high latency
+            self.error_rate_multiplier = 5.0  # 10% error rate
 
+        elif elapsed < 300:  # Next minute: Recovery
+            self.current_phase = "recovery"
+            # Gradual recovery
+            progress = (elapsed - 240) / 60
+            self.latency_multiplier = 2.5 - (progress * 1.5)
+            self.error_rate_multiplier = 5.0 - (progress * 4.0)
 
-def response_size_inflation(endpoint='/items', factor=5, bursts=10, interval=2.0):
-    log_injection('response_size_inflation', endpoint, {'size_factor': factor, 'bursts': bursts, 'interval': interval})
-    for i in range(bursts):
-        send_log(endpoint=endpoint, latency=120, status=200, size=1000 * factor)
-        time.sleep(interval)
+        else:  # Back to normal, repeat cycle
+            self.phase_start_time = time.time()
+            self.current_phase = "normal"
+            self.latency_multiplier = 1.0
+            self.error_rate_multiplier = 1.0
 
+    def run_simulation(self, duration_minutes: int = 10):
+        """Run the failure injection simulation."""
 
-if __name__ == '__main__':
-    # quick demo runner
-    print('Starting failure injection demo: gradual latency on /checkout')
-    gradual_latency()
-    print('done')
+        print("🚀 Starting Failure Injection Simulator")
+        print(f"📊 Target: {API_BASE_URL}")
+        print(f"⏱️  Duration: {duration_minutes} minutes")
+        print(f"📈 Endpoints: {', '.join(ENDPOINTS)}")
+        print("-" * 50)
+
+        start_time = time.time()
+        total_requests = 0
+        successful_requests = 0
+
+        try:
+            while (time.time() - start_time) < (duration_minutes * 60):
+                current_time = datetime.utcnow()
+                elapsed = time.time() - start_time
+
+                # Update failure conditions
+                self.update_failure_conditions(elapsed)
+
+                # Generate and send requests
+                requests_this_second = REQUESTS_PER_SECOND + random.randint(-1, 1)
+                for _ in range(max(1, requests_this_second)):
+                    endpoint = random.choice(ENDPOINTS)
+                    log_entry = self.generate_log_entry(endpoint, current_time)
+
+                    if self.send_log(log_entry):
+                        successful_requests += 1
+                    total_requests += 1
+
+                # Status update every 10 seconds
+                if int(elapsed) % 10 == 0 and elapsed > 0:
+                    success_rate = (successful_requests / total_requests * 100) if total_requests > 0 else 0
+                    print(f"📊 Phase: {self.current_phase.upper()} | "
+                          f"Latency: {self.latency_multiplier:.1f}x | "
+                          f"Errors: {self.error_rate_multiplier:.1f}x | "
+                          f"Sent: {total_requests} ({success_rate:.1f}% success)")
+
+                # Wait for next second
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            print("\n🛑 Simulation stopped by user")
+
+        finally:
+            self.client.close()
+            print("\n✅ Simulation completed")
+            print(f"📈 Total requests sent: {total_requests}")
+            print(f"✅ Successful: {successful_requests}")
+            print(f"📊 Success rate: {successful_requests/total_requests*100:.1f}%" if total_requests > 0 else "📊 Success rate: N/A")
+            print("💡 Run 'python src/process_once.py' to analyze the injected failures")
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Failure Injection Simulator for EWS")
+    parser.add_argument("--duration", type=int, default=10,
+                       help="Simulation duration in minutes (default: 10)")
+    parser.add_argument("--url", type=str, default="http://localhost:8001",
+                       help="API base URL (default: http://localhost:8001)")
+
+    args = parser.parse_args()
+
+    # Update global config
+    global API_BASE_URL, INGEST_ENDPOINT
+    API_BASE_URL = args.url
+    INGEST_ENDPOINT = f"{API_BASE_URL}/ingest"
+
+    # Check if API is available
+    try:
+        with httpx.Client(timeout=5) as client:
+            response = client.get(f"{API_BASE_URL}/health")
+            if response.status_code != 200:
+                print(f"❌ API health check failed: {response.status_code}")
+                return
+    except Exception as e:
+        print(f"❌ Cannot connect to API: {e}")
+        print("💡 Make sure the ingest service is running: python src/ingest_service.py")
+        return
+
+    print("✅ API connection successful")
+
+    # Run simulation
+    injector = FailureInjector()
+    injector.run_simulation(args.duration)
+
+if __name__ == "__main__":
+    main()
