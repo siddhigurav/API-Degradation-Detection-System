@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 
 function Alerts() {
   const [alerts, setAlerts] = useState([]);
@@ -70,10 +71,32 @@ function Alerts() {
     }
   };
 
+  const computeSignals = (alert) => {
+    if (!alert) return 0;
+    if (alert.anomaly_count != null) return alert.anomaly_count;
+    if (Array.isArray(alert.metrics_involved)) return alert.metrics_involved.length;
+    if (Array.isArray(alert.anomalous_metrics)) return alert.anomalous_metrics.length;
+    return 1;
+  };
+
+  const sinceMinutes = (timestamp) => {
+    if (!timestamp) return 'N/A';
+    try {
+      const diffMs = Date.now() - new Date(timestamp).getTime();
+      const mins = Math.max(0, Math.round(diffMs / 60000));
+      return `${mins} min`;
+    } catch {
+      return 'N/A';
+    }
+  };
+
   return (
     <section>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <h2>Alerts</h2>
+        <div>
+          <h2>Active Alerts</h2>
+          <div style={{ color: '#6b7280', marginTop: '6px' }}>Default landing page</div>
+        </div>
         <button 
           onClick={fetchAlerts}
           style={{
@@ -89,78 +112,35 @@ function Alerts() {
           Refresh
         </button>
       </div>
+
       <table className="alerts-table">
         <thead>
           <tr>
-            <th>Severity</th>
             <th>Endpoint</th>
-            <th>Explanation</th>
-            <th>Metrics</th>
-            <th>Time</th>
-            <th></th>
+            <th>Severity</th>
+            <th>Signals</th>
+            <th>Since</th>
           </tr>
         </thead>
         <tbody>
           {alerts.length === 0 ? (
             <tr>
-              <td colSpan="6" style={{ textAlign: 'center', padding: '32px', color: '#6b7280' }}>
-                No alerts found
+              <td colSpan="4" style={{ textAlign: 'center', padding: '32px', color: '#6b7280' }}>
+                No active alerts
               </td>
             </tr>
           ) : (
             alerts.map((alert, index) => (
-              <React.Fragment key={alert.id || index}>
-                <tr>
-                  <td>
-                    <span className={`severity-badge ${getSeverityClass(alert.severity)}`}>
-                      {alert.severity || 'INFO'}
-                    </span>
-                  </td>
-                  <td>{alert.endpoint || 'N/A'}</td>
-                  <td style={{ maxWidth: '300px' }}>
-                    {expandedAlert === alert.id ? 
-                      alert.explanation : 
-                      truncateExplanation(alert.explanation || 'No explanation available')
-                    }
-                  </td>
-                  <td>{alert.metrics_involved?.join(', ') || 'N/A'}</td>
-                  <td>{formatTime(alert.timestamp)}</td>
-                  <td>
-                    <button 
-                      onClick={() => toggleExpanded(alert.id)}
-                      style={{ 
-                        background: 'none', 
-                        border: '1px solid #d1d5db', 
-                        padding: '4px 8px', 
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '12px'
-                      }}
-                    >
-                      {expandedAlert === alert.id ? 'Collapse' : 'Expand'}
-                    </button>
-                  </td>
-                </tr>
-                {expandedAlert === alert.id && (
-                  <tr>
-                    <td colSpan="6" style={{ 
-                      backgroundColor: '#f9fafb', 
-                      padding: '16px',
-                      borderTop: '1px solid #e5e7eb'
-                    }}>
-                      <pre style={{ 
-                        whiteSpace: 'pre-wrap', 
-                        fontFamily: 'inherit',
-                        margin: 0,
-                        fontSize: '14px',
-                        lineHeight: '1.5'
-                      }}>
-                        {alert.explanation}
-                      </pre>
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
+              <tr key={alert.id || index}>
+                <td style={{ fontWeight: 600 }}>{alert.endpoint || 'N/A'}</td>
+                <td>
+                  <span className={`severity-badge ${getSeverityClass(alert.severity)}`}>
+                    {alert.severity || 'INFO'}
+                  </span>
+                </td>
+                <td>{computeSignals(alert)}</td>
+                <td>{sinceMinutes(alert.timestamp)}</td>
+              </tr>
             ))
           )}
         </tbody>
