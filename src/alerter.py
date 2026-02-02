@@ -12,199 +12,81 @@ the system effectively doesn't exist for users.
 from typing import Dict, Any, List, Optional
 import os
 import json
-import sqlite3
-from datetime import datetime, timezone
-import uuid
 import time
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+# Import helpers with fallbacks so `src` can be added to PYTHONPATH for tests
+try:
+    from .config import db_path as _config_db_path, LOG_LEVEL, ALERTS_FILE
+    from .logging_config import configure_logging
+    from .storage.alert_store import AlertStore as _AlertStoreImpl
+except Exception:
+    # Best-effort fallback: load modules directly from files adjacent to this
+    # module so the package import style doesn't matter (useful for test scripts).
+    import importlib.util
+    from pathlib import Path
+
+    base = Path(__file__).resolve().parent
+
+    def _load_module_from(path: Path, name: str):
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore
+        return module
+
+    cfg_mod = _load_module_from(base / 'config.py', 'local_config')
+    _config_db_path = cfg_mod.db_path
+    LOG_LEVEL = getattr(cfg_mod, 'LOG_LEVEL', 'INFO')
+    ALERTS_FILE = getattr(cfg_mod, 'ALERTS_FILE', None)
+
+    logging_mod = _load_module_from(base / 'logging_config.py', 'local_logging_config')
+    configure_logging = logging_mod.configure_logging
+
+    storage_mod = _load_module_from(base / 'storage' / 'alert_store.py', 'local_alert_store')
+    _AlertStoreImpl = storage_mod.AlertStore
+
+# initialize structured logging
+configure_logging(LOG_LEVEL)
+
 # Legacy imports for backward compatibility
 SLACK_WEBHOOK = os.environ.get('SLACK_WEBHOOK_URL')
 
-BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
-ALERTS_DB = os.path.join(DATA_DIR, 'alerts.db')
-ALERTS_FILE = os.path.join(DATA_DIR, 'alerts.jsonl')  # Legacy support
-
 
 class AlertStore:
-    """Persistent storage for alerts with SQLite backend."""
+    """Backward-compatible wrapper exposing the original `AlertStore` API.
 
-    def __init__(self):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        self._init_db()
+    Accepts an optional `db_path`. If omitted the path from configuration
+    will be used.
+    """
 
-    def _init_db(self):
-        """Initialize the alerts database."""
-        conn = sqlite3.connect(ALERTS_DB)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS alerts (
-                id TEXT PRIMARY KEY,
-                endpoint TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                window TEXT NOT NULL,
-                anomaly_count INTEGER NOT NULL,
-                avg_deviation REAL NOT NULL,
-                max_deviation REAL NOT NULL,
-                anomalous_metrics TEXT NOT NULL,  -- JSON array
-                explanation TEXT NOT NULL,
-                insights TEXT NOT NULL,  -- JSON array
-                recommendations TEXT NOT NULL,  -- JSON array
-                timestamp TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                status TEXT DEFAULT 'active'  -- active, acknowledged, resolved
-            )
-        ''')
-
-        conn.commit()
-        conn.close()
+    def __init__(self, db_path: Optional[str] = None):
+        db_path = db_path or _config_db_path()
+        self._impl = _AlertStoreImpl(db_path)
 
     def store_alert(self, alert: Dict[str, Any]) -> str:
-        """
-        Store an explained alert and return its ID.
-
-        Alert must contain: endpoint, severity, window, anomalous_metrics,
-        explanation, insights, recommendations, timestamp
-        """
-        alert_id = str(uuid.uuid4())
-
-        # Prepare data for storage
-        anomalous_metrics_json = json.dumps(alert['anomalous_metrics'])
-        insights_json = json.dumps(alert.get('insights', []))
-        recommendations_json = json.dumps(alert.get('recommendations', []))
-
-        conn = sqlite3.connect(ALERTS_DB)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            INSERT INTO alerts
-            (id, endpoint, severity, window, anomaly_count, avg_deviation,
-             max_deviation, anomalous_metrics, explanation, insights,
-             recommendations, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            alert_id,
-            alert['endpoint'],
-            alert['severity'],
-            alert['window'],
-            alert.get('anomaly_count', 0),
-            alert.get('avg_deviation', 0.0),
-            alert.get('max_deviation', 0.0),
-            anomalous_metrics_json,
-            alert['explanation'],
-            insights_json,
-            recommendations_json,
-            alert.get('timestamp', datetime.now(timezone.utc).isoformat())
-        ))
-
-        conn.commit()
-        conn.close()
-
-        return alert_id
+        return self._impl.store_alert(alert)
 
     def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a specific alert by ID."""
-        conn = sqlite3.connect(ALERTS_DB)
-        cursor = conn.cursor()
+        return self._impl.get_alert(alert_id)
 
-        cursor.execute('SELECT * FROM alerts WHERE id = ?', (alert_id,))
-        row = cursor.fetchone()
-        conn.close()
-
-        if not row:
-            return None
-
-        # Convert row to dict and parse JSON fields
-        alert = {
-            'id': row[0],
-            'endpoint': row[1],
-            'severity': row[2],
-            'window': row[3],
-            'anomaly_count': row[4],
-            'avg_deviation': row[5],
-            'max_deviation': row[6],
-            'anomalous_metrics': json.loads(row[7]),
-            'explanation': row[8],
-            'insights': json.loads(row[9]),
-            'recommendations': json.loads(row[10]),
-            'timestamp': row[11],
-            'created_at': row[12],
-            'status': row[13]
-        }
-
-        return alert
-
-    def get_all_alerts(self, limit: int = 100, status: str = None) -> List[Dict[str, Any]]:
-        """Retrieve all alerts, optionally filtered by status."""
-        conn = sqlite3.connect(ALERTS_DB)
-        cursor = conn.cursor()
-
-        query = 'SELECT * FROM alerts'
-        params = []
-
-        if status:
-            query += ' WHERE status = ?'
-            params.append(status)
-
-        query += ' ORDER BY created_at DESC LIMIT ?'
-        params.append(limit)
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        conn.close()
-
-        alerts = []
-        for row in rows:
-            alert = {
-                'id': row[0],
-                'endpoint': row[1],
-                'severity': row[2],
-                'window': row[3],
-                'anomaly_count': row[4],
-                'avg_deviation': row[5],
-                'max_deviation': row[6],
-                'anomalous_metrics': json.loads(row[7]),
-                'explanation': row[8],
-                'insights': json.loads(row[9]),
-                'recommendations': json.loads(row[10]),
-                'timestamp': row[11],
-                'created_at': row[12],
-                'status': row[13]
-            }
-            alerts.append(alert)
-
-        return alerts
+    def get_all_alerts(self, limit: int = 100, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self._impl.get_all_alerts(limit=limit, status=status)
 
     def update_alert_status(self, alert_id: str, status: str) -> bool:
-        """Update the status of an alert (active, acknowledged, resolved)."""
-        conn = sqlite3.connect(ALERTS_DB)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            'UPDATE alerts SET status = ? WHERE id = ?',
-            (status, alert_id)
-        )
-
-        success = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
-
-        return success
+        return self._impl.update_alert_status(alert_id, status)
 
 
-# Global alert store instance
-_alert_store = None
+# Module-level singleton accessor for the web app handlers
+_global_store: Optional[AlertStore] = None
+
 
 def get_alert_store() -> AlertStore:
-    """Get the global alert store instance."""
-    global _alert_store
-    if _alert_store is None:
-        _alert_store = AlertStore()
-    return _alert_store
+    global _global_store
+    if _global_store is None:
+        _global_store = AlertStore()
+    return _global_store
 
 
 def store_alerts(explained_alerts: List[Dict[str, Any]]) -> List[str]:

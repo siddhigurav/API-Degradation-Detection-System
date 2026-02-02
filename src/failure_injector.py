@@ -12,7 +12,7 @@ Sends logs to the /ingest API endpoint in real-time.
 
 import time
 import random
-import httpx
+import requests
 import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
@@ -29,7 +29,7 @@ REQUESTS_PER_SECOND = 2  # baseline load
 
 class FailureInjector:
     def __init__(self):
-        self.client = httpx.Client(timeout=5.0)
+        self.client = requests.Session()
         self.current_phase = "normal"
         self.phase_start_time = time.time()
         self.latency_multiplier = 1.0
@@ -62,7 +62,7 @@ class FailureInjector:
     def send_log(self, log_entry: Dict[str, Any]) -> bool:
         """Send a log entry to the ingest API."""
         try:
-            response = self.client.post(INGEST_ENDPOINT, json=log_entry)
+            response = self.client.post(INGEST_ENDPOINT, json=log_entry, timeout=5)
             return response.status_code == 200
         except Exception as e:
             print(f"Failed to send log: {e}")
@@ -172,11 +172,10 @@ def main():
 
     # Check if API is available
     try:
-        with httpx.Client(timeout=5) as client:
-            response = client.get(f"{API_BASE_URL}/health")
-            if response.status_code != 200:
-                print(f"❌ API health check failed: {response.status_code}")
-                return
+        resp = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        if resp.status_code != 200:
+            print(f"❌ API health check failed: {resp.status_code}")
+            return
     except Exception as e:
         print(f"❌ Cannot connect to API: {e}")
         print("💡 Make sure the ingest service is running: python src/ingest_service.py")

@@ -1,149 +1,143 @@
-"""
-Explainable Anomaly Detection Module
+"""Detector - lightweight stub replacement.
 
-Uses EWMA (for slow drifts) and Z-Score (for sudden spikes) per endpoint.
-Trains on historical aggregates per metric.
-Detects deviations with configurable thresholds.
-Justification: reasons include z-score, pct-change, ewma-deviation.
+This repository previously included a more complex detector implementation.
+For cleanup purposes this file now provides a minimal, safe stub of the
+public API so other modules can import it without failing during demos
+or tests. It intentionally returns no anomalies.
 
-Threshold Logic:
-- Z-Score > 3.0: Sudden spike/outlier.
-- Pct Change > 25%: Significant change.
-- EWMA Deviation > 0.2: Slow drift (current - ewma_mean) / ewma_std > 0.2.
-- Demo threshold: avg_latency > 400ms for testing.
-
-Example Input: List of new aggregates (from aggregator).
-Example Output: Dict of detections with flagged metrics and reasons.
+If you need the original detector behavior restore from version control
+or implement a detection algorithm in place of this stub.
 """
 
-import os
-import json
-import math
-import pandas as pd
-from aggregator import read_aggregates as read_agg_from_storage
 from typing import Dict, Any, List
 
-BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
-AGG_LOGS = os.path.join(DATA_DIR, 'aggregates.jsonl')
 
-# Configurable thresholds (engineer-tunable)
-Z_SCORE_THRESHOLD = 3.0
-PCT_CHANGE_THRESHOLD = 0.25  # 25% change flagged
-EWMA_DEVIATION_THRESHOLD = 0.2  # Deviation from EWMA mean in std units
-MIN_VOLUME_FOR_STATS = 5
+def detect_anomalies(current_metrics: Dict[str, Any], baseline_metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return an empty anomaly list (stub).
 
-
-def read_aggregates():
-    """Read historical aggregates from storage (SQLite or JSONL)."""
-    df = read_agg_from_storage()
-    # Ensure we have the expected column format for detector
-    if 'window' in df.columns and 'window_minutes' not in df.columns:
-        df['window_minutes'] = df['window'].str.rstrip('m').astype(int)
-    if 'response_var' in df.columns and 'response_size_variance' not in df.columns:
-        df['response_size_variance'] = df['response_var']
-    if 'timestamp' in df.columns and 'window_end' not in df.columns:
-        df['window_end'] = pd.to_datetime(df['timestamp'], format='mixed')
-    return df
-    df['window_end'] = pd.to_datetime(df['window_end'])
-    return df
-
-
-def detect(aggregates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    This keeps module imports and call sites working while removing the
+    heavyweight detector implementation that is considered unnecessary.
     """
-    Input: newest aggregate records (list of per-endpoint dicts for one run)
-    Output: List of metric-level anomalies with simplified format
-    Each anomaly: {metric, deviation, window, severity}
+    return []
+import logging
+import math
+
+logger = logging.getLogger(__name__)
+
+
+def _severity_from_z(z: float) -> str:
+    """Map z-score to severity label."""
+    az = abs(z)
+    if az >= 3.0:
+        return "HIGH"
+    if az >= 2.0:
+        return "MEDIUM"
+    if az >= 1.0:
+        return "LOW"
+    return "LOW"
+
+
+def detect_anomalies(current_metrics: Dict[str, Dict[str, Dict[str, Any]]],
+                     baseline_metrics: Dict[str, Dict[str, Dict[str, float]]]) -> List[Dict[str, Any]]:
+    """Detect anomalies comparing current metrics to a provided baseline.
+
+    Args:
+        current_metrics: endpoint -> window_iso -> metrics dict.
+        baseline_metrics: endpoint -> metric_name -> {"mean": float, "std": float}
+
+    Returns:
+        List of anomaly dicts.
     """
-    anomalies = []
-    if not aggregates:
-        return anomalies
+    anomalies: List[Dict[str, Any]] = []
 
-    df_all = read_aggregates()
-    df_new = pd.DataFrame(aggregates)
+    # Metrics we check
+    metric_names = ("avg_latency", "p95_latency", "error_rate")
 
-    # Convert window format if needed
-    if 'window' in df_new.columns:
-        df_new['window_minutes'] = df_new['window'].str.rstrip('m').astype(int)
-    if 'response_var' in df_new.columns:
-        df_new['response_size_variance'] = df_new['response_var']
+    for endpoint, windows in (current_metrics or {}).items():
+        endpoint_baseline = baseline_metrics.get(endpoint, {})
+        for window_start, metrics in (windows or {}).items():
+            for m in metric_names:
+                if m not in metrics:
+                    continue
 
-    for _, row in df_new.iterrows():
-        endpoint = row['endpoint']
-        w = row['window_minutes']
-        window_str = f"{w}m"
+                current_value = metrics.get(m)
+                baseline = endpoint_baseline.get(m)
 
-        # Build baseline from historical aggregates for same endpoint and window size
-        mask = (df_all['endpoint'] == endpoint) & (df_all['window_minutes'] == w)
-        hist = df_all[mask]
+                if baseline is None:
+                    # No baseline available for this metric/endpoint -> skip
+                    logger.debug("No baseline for %s %s %s", endpoint, window_start, m)
+                    continue
 
-        for metric in ['avg_latency', 'p95_latency', 'error_rate', 'request_volume', 'response_size_variance']:
-            cur = float(row.get(metric, float('nan')))
-            if math.isnan(cur):
-                continue
+                mean = baseline.get("mean")
+                std = baseline.get("std")
 
-            baseline_mean = float(hist[metric].mean()) if not hist.empty else float('nan')
-            baseline_std = float(hist[metric].std(ddof=0)) if not hist.empty else float('nan')
+                if mean is None or std is None:
+                    logger.debug("Baseline missing fields for %s %s %s", endpoint, window_start, m)
+                    continue
 
-            # Skip if insufficient historical data
-            if hist.empty or len(hist) < MIN_VOLUME_FOR_STATS:
-                continue
+                # Defensive numeric coercion
+                try:
+                    current_num = float(current_value)
+                    mean_num = float(mean)
+                    std_num = float(std)
+                except Exception:
+                    logger.debug("Non-numeric values for %s %s %s", endpoint, window_start, m)
+                    continue
 
-            # Calculate deviation (normalized z-score)
-            deviation = float('nan')
-            if not math.isnan(baseline_std) and baseline_std > 0:
-                deviation = (cur - baseline_mean) / baseline_std
+                # Compute deviation metrics
+                # z-score (use std if available, otherwise use relative difference)
+                if std_num > 0:
+                    z = (current_num - mean_num) / std_num
+                else:
+                    # if std is zero, fall back to relative change
+                    z = (current_num - mean_num) / (abs(mean_num) if mean_num != 0 else 1.0)
 
-            # Determine severity based on deviation magnitude
-            severity = "LOW"
-            if not math.isnan(deviation):
-                if abs(deviation) >= 5.0:
-                    severity = "CRITICAL"
-                elif abs(deviation) >= 3.0:
-                    severity = "HIGH"
-                elif abs(deviation) >= 2.0:
-                    severity = "MEDIUM"
+                # deviation_ratio: fractional change relative to mean
+                deviation_ratio = (current_num - mean_num) / (abs(mean_num) if mean_num != 0 else 1.0)
 
-            # Check for anomalies using multiple methods
-            is_anomaly = False
+                severity = _severity_from_z(z)
 
-            # Z-score method (sudden spikes)
-            if not math.isnan(deviation) and abs(deviation) >= Z_SCORE_THRESHOLD:
-                is_anomaly = True
+                # Decide whether this is an anomaly: use |z| >= 1.0 as threshold
+                is_anomaly = abs(z) >= 1.0
 
-            # Percentage change method
-            pct_change = (cur - baseline_mean) / baseline_mean if (baseline_mean and not math.isnan(baseline_mean) and baseline_mean != 0) else float('nan')
-            if not math.isnan(pct_change) and abs(pct_change) >= PCT_CHANGE_THRESHOLD:
-                is_anomaly = True
+                logger.debug(
+                    "Detect %s %s %s: current=%s mean=%s std=%s z=%.2f dev=%.3f anomaly=%s",
+                    endpoint, window_start, m, current_num, mean_num, std_num, z, deviation_ratio, is_anomaly
+                )
 
-            # EWMA drift detection
-            if len(hist) > 1:
-                hist_sorted = hist.sort_values('window_end')
-                ewma_series = hist_sorted[metric].ewm(span=10).mean()
-                ewma_mean = ewma_series.iloc[-1]
-                ewma_std = hist_sorted[metric].ewm(span=10).std().iloc[-1] if len(hist_sorted) > 1 else 0.0
-
-                if not math.isnan(ewma_std) and ewma_std > 0:
-                    ewma_dev = (cur - ewma_mean) / ewma_std
-                    if abs(ewma_dev) >= EWMA_DEVIATION_THRESHOLD:
-                        is_anomaly = True
-
-            # Create anomaly record if detected
-            if is_anomaly:
-                anomaly = {
-                    'metric': metric,
-                    'deviation': round(deviation, 2) if not math.isnan(deviation) else 0.0,
-                    'window': window_str,
-                    'severity': severity,
-                    'endpoint': endpoint,  # Include endpoint for context
-                    'current_value': cur,
-                    'baseline_mean': baseline_mean
-                }
-                anomalies.append(anomaly)
+                if is_anomaly:
+                    anomaly = {
+                        "endpoint": endpoint,
+                        "window_start": window_start,
+                        "metric_name": m,
+                        "baseline_value": mean_num,
+                        "current_value": current_num,
+                        "deviation_ratio": round(deviation_ratio, 4),
+                        "severity": severity,
+                    }
+                    logger.info("Anomaly detected: %s", anomaly)
+                    anomalies.append(anomaly)
 
     return anomalies
 
 
-if __name__ == '__main__':
-    print('Detector dry-run: reading latest aggregates...')
-    # To run a manual detection pass, generate aggregates then call `detect()` with the new records.
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+
+    # Minimal usage example
+    current = {
+        "/checkout": {
+            "2026-02-02T15:00:00Z": {"avg_latency": 160.0, "p95_latency": 300.0, "error_rate": 0.02}
+        }
+    }
+
+    baseline = {
+        "/checkout": {
+            "avg_latency": {"mean": 100.0, "std": 10.0},
+            "p95_latency": {"mean": 180.0, "std": 20.0},
+            "error_rate": {"mean": 0.005, "std": 0.002},
+        }
+    }
+
+    print(detect_anomalies(current, baseline))

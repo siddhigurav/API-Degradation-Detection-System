@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
-from aggregator import compute_aggregates
-from detector import detect
-from correlator import correlate
-from explainer import explain
-from alerter import alert
+from src.aggregator import compute_aggregates
+from src.detector import detect
+from src.correlator import correlate_anomalies
+from src.explainer import explain_alerts
+from src.alerter import store_alerts
 
 if __name__ == '__main__':
     now = datetime.now(timezone.utc)
@@ -16,22 +16,15 @@ if __name__ == '__main__':
         print('no anomalies detected')
         exit(0)
 
-    actionable = correlate(anomalies)
-    if not actionable:
-        print('no actionable anomalies found')
+    alert_candidates = correlate_anomalies(anomalies)
+    if not alert_candidates:
+        print('no alert candidates found')
         exit(0)
 
-    for endpoint, info in actionable.items():
-        triggered_anomalies = info['triggered_anomalies']
-        explanation = explain(endpoint, triggered_anomalies)
-        alert_obj = {
-            'endpoint': endpoint,
-            'severity': info['severity'],
-            'explanation': explanation,
-            'timestamp': now.isoformat().replace('+00:00', 'Z'),
-            'window': info['window'],
-            'anomaly_count': info['anomaly_count'],
-            'anomalies': triggered_anomalies,
-        }
-        alert(alert_obj)
-        print(f'alert emitted for {endpoint} ({info["severity"]} severity, {info["anomaly_count"]} anomalies)')
+    explained_alerts = explain_alerts(alert_candidates)
+    if not explained_alerts:
+        print('no explained alerts generated')
+        exit(0)
+
+    alert_ids = store_alerts(explained_alerts)
+    print(f'Successfully processed and stored {len(alert_ids)} alerts')
