@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { getAlerts } from './services/api';
 
 function Alerts() {
   const [alerts, setAlerts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [expandedAlert, setExpandedAlert] = useState(null);
 
   useEffect(() => {
@@ -11,30 +14,16 @@ function Alerts() {
 
   const fetchAlerts = async () => {
     try {
-      const response = await fetch('/alerts');
-      const data = await response.json();
-      setAlerts(data.alerts || []);
+      setLoading(true);
+      const response = await getAlerts();
+      setAlerts(response.data.alerts || []);
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch alerts:', error);
-      // Use mock data for development
-      setAlerts([
-        {
-          id: 'mock-1',
-          endpoint: '/checkout',
-          severity: 'CRITICAL',
-          explanation: '🚨 CRITICAL ALERT: /checkout endpoint showing degradation over the last 5m.\n\n📈 WHAT CHANGED:\n• Average latency increased from 120ms to 800ms (+567%)\n• P95 latency increased from 180ms to 1200ms (+567%)\n• Error rate increased from 2% to 15% (+650%)\n\n📊 WHAT STAYED STABLE:\n• Request volume remained consistent\n\n💡 RECOMMENDATIONS:\n• Check database connection performance\n• Review recent code deployments\n• Monitor server CPU/memory usage',
-          timestamp: new Date().toISOString(),
-          metrics_involved: ['avg_latency', 'p95_latency', 'error_rate']
-        },
-        {
-          id: 'mock-2',
-          endpoint: '/api/users',
-          severity: 'WARNING',
-          explanation: '⚠️ WARNING: /api/users endpoint showing moderate degradation.\n\n📈 WHAT CHANGED:\n• Average latency increased from 80ms to 200ms (+150%)\n\n📊 WHAT STAYED STABLE:\n• Error rates remained low\n• Request volume consistent\n\n💡 RECOMMENDATIONS:\n• Monitor for further degradation\n• Check for increased database load',
-          timestamp: new Date(Date.now() - 300000).toISOString(),
-          metrics_involved: ['avg_latency']
-        }
-      ]);
+      setError('Failed to load alerts');
+      setAlerts([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -112,6 +101,9 @@ function Alerts() {
           Refresh
         </button>
       </div>
+
+      {loading && <div>Loading alerts...</div>}
+      {error && <div>Error: {error}</div>}
 
       <table className="alerts-table">
         <thead>

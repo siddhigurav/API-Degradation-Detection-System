@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { getAlerts } from './services/api';
 
 function EndpointHealth() {
   const [endpoints, setEndpoints] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -9,9 +12,9 @@ function EndpointHealth() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch('/alerts');
-      const data = await res.json();
-      const alerts = data.alerts || [];
+      setLoading(true);
+      const response = await getAlerts();
+      const alerts = response.data.alerts || [];
 
       // Aggregate by endpoint
       const map = {};
@@ -51,13 +54,19 @@ function EndpointHealth() {
         return { endpoint: e.endpoint, status, lastAlert: last };
       });
 
-      // ensure some known endpoints appear even if no alerts (optional)
       setEndpoints(list);
+      setError(null);
     } catch (err) {
       console.error('Failed to load endpoints', err);
+      setError('Failed to load endpoint health');
       setEndpoints([]);
+    } finally {
+      setLoading(false);
     }
   };
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error}</div>;
 
   return (
     <section>

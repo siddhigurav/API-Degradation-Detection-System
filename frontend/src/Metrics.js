@@ -1,35 +1,37 @@
 import React, { useState, useEffect } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import { getMetrics } from './services/api';
 
 function Metrics() {
   const [metrics, setMetrics] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [serviceName, setServiceName] = useState('default');
+  const [endpoint, setEndpoint] = useState('checkout');
 
   useEffect(() => {
     fetchMetrics();
-  }, []);
+  }, [serviceName, endpoint]);
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch('/metrics/checkout?window=15');
-      const data = await response.json();
-      setMetrics(data);
+      setLoading(true);
+      const response = await getMetrics(serviceName, endpoint);
+      const data = response.data;
+      // Assume data is array of metrics over time
+      setMetrics(data || []);
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
-      // Use mock data for development
-      setMetrics([
-        { window_end: new Date(Date.now() - 900000).toISOString(), p95_latency: 120, avg_latency: 80, error_rate: 0.02 },
-        { window_end: new Date(Date.now() - 780000).toISOString(), p95_latency: 130, avg_latency: 85, error_rate: 0.02 },
-        { window_end: new Date(Date.now() - 660000).toISOString(), p95_latency: 140, avg_latency: 90, error_rate: 0.03 },
-        { window_end: new Date(Date.now() - 540000).toISOString(), p95_latency: 200, avg_latency: 150, error_rate: 0.05 },
-        { window_end: new Date(Date.now() - 420000).toISOString(), p95_latency: 400, avg_latency: 300, error_rate: 0.08 },
-        { window_end: new Date(Date.now() - 300000).toISOString(), p95_latency: 800, avg_latency: 600, error_rate: 0.12 },
-        { window_end: new Date(Date.now() - 180000).toISOString(), p95_latency: 1000, avg_latency: 750, error_rate: 0.15 },
-        { window_end: new Date(Date.now() - 60000).toISOString(), p95_latency: 1200, avg_latency: 800, error_rate: 0.18 }
-      ]);
+      setError('Failed to load metrics');
+      setMetrics([]);
+    } finally {
+      setLoading(false);
     }
   };
 
   // Simple line chart component
-  const LineChart = ({ data, width = 800, height = 300 }) => {
+  const CustomLineChart = ({ data, width = 800, height = 300 }) => {
     if (!data || data.length === 0) {
       return (
         <div style={{ width, height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6b7280' }}>
@@ -134,9 +136,30 @@ function Metrics() {
   return (
     <section className="metrics-section">
       <h2>Endpoint Metrics</h2>
-      <div className="metrics-subtitle">p95 latency</div>
+      <div style={{ marginBottom: '16px' }}>
+        <label>Service: </label>
+        <input value={serviceName} onChange={(e) => setServiceName(e.target.value)} />
+        <label style={{ marginLeft: '16px' }}>Endpoint: </label>
+        <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
+        <button onClick={fetchMetrics} style={{ marginLeft: '16px' }}>Load</button>
+      </div>
+      {loading && <div>Loading metrics...</div>}
+      {error && <div>Error: {error}</div>}
       <div className="chart-container">
-        <LineChart data={metrics} />
+        {metrics.length > 0 ? (
+          <LineChart width={800} height={400} data={metrics}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="window_end" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" dataKey="avg_latency" stroke="#8884d8" />
+            <Line type="monotone" dataKey="p95_latency" stroke="#82ca9d" />
+            <Line type="monotone" dataKey="error_rate" stroke="#ff7300" />
+          </LineChart>
+        ) : (
+          <div>No metrics available</div>
+        )}
       </div>
     </section>
   );
