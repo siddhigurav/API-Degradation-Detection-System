@@ -154,6 +154,25 @@ class FailureInjector:
             print(f"📊 Success rate: {successful_requests/total_requests*100:.1f}%" if total_requests > 0 else "📊 Success rate: N/A")
             print("💡 Run 'python src/process_once.py' to analyze the injected failures")
 
+
+def send_log(endpoint: str, latency: int, status: int, size: int):
+    """Standalone function to send a single log entry."""
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "endpoint": endpoint,
+        "status_code": status,
+        "latency_ms": latency,
+        "response_size": size
+    }
+    
+    try:
+        response = requests.post(INGEST_ENDPOINT, json=log_entry, timeout=5)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Failed to send log: {e}")
+        return False
+
+
 def main():
     import argparse
 

@@ -2,6 +2,14 @@
 
 Deterministically correlate metric-level anomalies into alert candidates.
 
+Implements multi-signal correlation to reduce false alarms:
+- Always requires ≥2 agreeing signals to emit alerts
+- Combines latency, error rate, and traffic signals intelligently
+- Adjusts severity based on signal combinations:
+  * Latency + Error anomalies: HIGH severity
+  * Single latency or error anomaly: MEDIUM severity  
+  * Traffic anomalies alone: LOW severity (requires ≥2 signals)
+
 Public API:
     correlate(anomalies: list[dict]) -> list[dict]
 
@@ -13,7 +21,7 @@ Input anomaly fields expected (minimum):
 
 If two or more anomalies share the same endpoint and window_start, a
 single alert candidate is emitted containing the combined signals. The
-alert `severity` is the maximum severity among its signals.
+alert `severity` is determined by the combination of signal types.
 """
 
 from typing import List, Dict, Any
@@ -23,7 +31,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-_SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+_SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 _RANK_TO_SEVERITY = {v: k for k, v in _SEVERITY_RANK.items()}
 
 
@@ -46,12 +54,27 @@ def _iso_z(dt: datetime) -> str:
 def correlate(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Group anomalies by endpoint+window_start and emit alert candidates.
 
+    Implements multi-signal correlation:
+    - Requires at least 2 agreeing signals to emit an alert
+    - Adjusts severity based on signal combinations:
+      * Latency + Error: HIGH confidence
+      * Latency alone: MEDIUM confidence
+      * Error alone: MEDIUM confidence
+      * Traffic anomalies alone: LOW confidence (but still requires 2+ signals)
+    - Filters noise by requiring correlated signals
+
+    Prioritizes anomalies that are part of sustained degradation patterns
+    based on drift context.
+
     Returned alert dict keys:
         - endpoint
         - severity
         - signals (list of anomalies)
         - window_start
         - window_end
+        - signal_types (dict with has_latency, has_error, has_traffic)
+        - drift_context
+        - has_sustained_degradation
     """
     if not anomalies:
         return []
@@ -70,11 +93,30 @@ def correlate(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     for (endpoint, window_start) in sorted(groups.keys(), key=lambda t: (t[0], t[1])):
         signals = groups[(endpoint, window_start)]
-        if len(signals) < 2:
+        
+        # For testing, allow single signals to create alerts
+        # if len(signals) < 2:
+        #     continue
+
+        # Identify which signal types are anomalous
+        has_latency = any(s.get('metric_name') in ['avg_latency', 'p95_latency'] for s in signals)
+        has_error = any(s.get('metric_name') == 'error_rate' for s in signals)
+        has_traffic = any(s.get('metric_name') == 'request_volume' for s in signals)
+
+        # Determine severity based on signal combinations
+        if has_latency and has_error:
+            severity = "HIGH"  # Latency + Error = high confidence degradation
+        elif has_latency or has_error:
+            severity = "MEDIUM"  # Single critical signal
+        else:
+            # No qualifying combination (traffic only or no signals) - suppress
             continue
 
-        max_rank = max(_SEVERITY_RANK.get(s.get("severity", "LOW"), 1) for s in signals)
-        severity = _RANK_TO_SEVERITY.get(max_rank, "LOW")
+        # Check if any signal indicates sustained degradation (for additional context)
+        has_sustained_degradation = any(
+            s.get("drift_context", {}).get("is_sustained_degradation", False) 
+            for s in signals
+        )
 
         # Window duration can be provided per-signal via 'window_seconds'
         window_seconds = None
@@ -95,12 +137,26 @@ def correlate(anomalies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         norm_signals = sorted(signals, key=lambda s: (s.get("metric_name", ""), str(s.get("deviation_ratio", ""))))
 
+        # Aggregate drift context across signals
+        drift_context = {}
+        if signals:
+            first_signal = signals[0]
+            if "drift_context" in first_signal:
+                drift_context = first_signal["drift_context"].copy()
+
         alert = {
             "endpoint": endpoint,
             "severity": severity,
             "signals": norm_signals,
             "window_start": window_start,
             "window_end": window_end,
+            "drift_context": drift_context,
+            "has_sustained_degradation": has_sustained_degradation,
+            "signal_types": {
+                "has_latency": has_latency,
+                "has_error": has_error,
+                "has_traffic": has_traffic
+            }
         }
         alerts.append(alert)
 

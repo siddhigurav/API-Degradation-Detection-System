@@ -17,9 +17,9 @@ def test_detect_anomalies_basic():
 
     baseline = {
         "/checkout": {
-            "avg_latency": {"mean": 100.0, "std": 10.0},
-            "p95_latency": {"mean": 180.0, "std": 20.0},
-            "error_rate": {"mean": 0.005, "std": 0.002},
+            "avg_latency": {"mean": 100.0, "std": 10.0, "ewma": 100.0, "ewma_std": 10.0, "count": 20},
+            "p95_latency": {"mean": 180.0, "std": 20.0, "ewma": 180.0, "ewma_std": 20.0, "count": 20},
+            "error_rate": {"mean": 0.005, "std": 0.002, "ewma": 0.005, "ewma_std": 0.002, "count": 20},
         }
     }
 

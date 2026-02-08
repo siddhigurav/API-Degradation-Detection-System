@@ -389,48 +389,46 @@ def read_aggregates():
 
 def compute_aggregates(now=None):
     """
-    Compute aggregates for each window per endpoint.
-    Uses efficient filtering: only logs within the window are processed.
-    Persists to SQLite (recommended) or JSONL file.
+    Compute aggregates using the rolling aggregator.
+    Loads all raw logs into the aggregator and gets current metrics.
     """
+    from aggregator import RollingMetricsAggregator
+
     now = now or datetime.now(timezone.utc)
     df = read_raw_logs()
     if df.empty:
         return []
+
+    # Create aggregator and load all logs
+    agg = RollingMetricsAggregator()
+    for _, row in df.iterrows():
+        log = {
+            'endpoint': row['endpoint'],
+            'latency_ms': row['latency_ms'],
+            'status_code': row['status_code'],
+            'timestamp': row['timestamp'].isoformat().replace('+00:00', 'Z')
+        }
+        agg.add_log(log)
+
+    # Get metrics
+    metrics = agg.get_metrics()
+
+    # Flatten to list format
     results = []
-    for w in WINDOWS_MIN:
-        window_start = pd.Timestamp(now - timedelta(minutes=w))
-        df_w = df[df['timestamp'] >= window_start]
-        if df_w.empty:
-            continue
-        grouped = df_w.groupby('endpoint')
-        for endpoint, g in grouped:
-            avg_latency = float(g['latency_ms'].mean())
-            p95_latency = float(g['latency_ms'].quantile(0.95))
-            error_rate = float((g['status_code'] >= 500).sum() / len(g))
-            request_volume = int(len(g))
-            resp_size_var = float(g['response_size'].var(ddof=0) if len(g) > 1 else 0.0)
+    for endpoint, windows in metrics.items():
+        for window_name, mets in windows.items():
+            window_min = int(window_name.split('_')[1][:-1])
             rec = {
                 'endpoint': endpoint,
-                'window': f'{w}m',
-                'avg_latency': avg_latency,
-                'p95_latency': p95_latency,
-                'error_rate': error_rate,
-                'request_volume': request_volume,
-                'response_var': resp_size_var,
+                'window': f'{window_min}m',
+                'avg_latency': mets['avg_latency'],
+                'p95_latency': mets['p95_latency'],
+                'error_rate': mets['error_rate'],
+                'request_volume': mets['request_volume'],
+                'response_var': 0.0,  # Not computed
                 'timestamp': now.isoformat().replace('+00:00', 'Z')
             }
             results.append(rec)
-    
-    # Persist aggregates based on storage mode
-    if STORAGE_MODE == 'sqlite':
-        persist_aggregates_to_db(results)
-    else:
-        # Fallback to JSONL persistence
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(AGG_LOGS, 'a', encoding='utf-8') as fh:
-            for r in results:
-                fh.write(json.dumps(r) + '\n')
     
     return results
 

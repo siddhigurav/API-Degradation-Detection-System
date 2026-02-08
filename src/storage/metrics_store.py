@@ -159,6 +159,10 @@ class InMemoryMetricsStorage(MetricsStorageBackend):
             print(f"Error clearing old data from memory: {e}")
             return 0
 
+    def clear(self) -> None:
+        """Clear all stored metrics."""
+        self._metrics = []
+
 
 class SQLiteMetricsStorage(MetricsStorageBackend):
     """SQLite-based persistent storage backend for production use."""

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Import helpers with fallbacks so `src` can be added to PYTHONPATH for tests
 try:
-    from .config import db_path as _config_db_path, LOG_LEVEL, ALERTS_FILE
+    from .config import db_path as _config_db_path, LOG_LEVEL, ALERTS_FILE, STORAGE_BACKEND, SQLITE_DB_PATH, REDIS_URL, REDIS_KEY_PREFIX, TIMESCALE_CONNECTION_STRING
     from .logging_config import configure_logging
     from .storage.alert_store import AlertStore as _AlertStoreImpl
 except Exception:
@@ -40,6 +40,11 @@ except Exception:
     _config_db_path = cfg_mod.db_path
     LOG_LEVEL = getattr(cfg_mod, 'LOG_LEVEL', 'INFO')
     ALERTS_FILE = getattr(cfg_mod, 'ALERTS_FILE', None)
+    STORAGE_BACKEND = getattr(cfg_mod, 'STORAGE_BACKEND', 'memory')
+    SQLITE_DB_PATH = getattr(cfg_mod, 'SQLITE_DB_PATH', Path('data/alerts.db'))
+    REDIS_URL = getattr(cfg_mod, 'REDIS_URL', 'redis://localhost:6379/0')
+    REDIS_KEY_PREFIX = getattr(cfg_mod, 'REDIS_KEY_PREFIX', 'alerts:')
+    TIMESCALE_CONNECTION_STRING = getattr(cfg_mod, 'TIMESCALE_CONNECTION_STRING', 'postgresql://localhost:5432/alerts')
 
     logging_mod = _load_module_from(base / 'logging_config.py', 'local_logging_config')
     configure_logging = logging_mod.configure_logging
@@ -61,9 +66,19 @@ class AlertStore:
     will be used.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
-        db_path = db_path or _config_db_path()
-        self._impl = _AlertStoreImpl(db_path)
+    def __init__(self, db_path: Optional[str] = None, backend: Optional[str] = None):
+        # Use provided backend or fall back to config
+        backend = backend or STORAGE_BACKEND
+
+        if backend == 'sqlite':
+            db_path = db_path or str(SQLITE_DB_PATH)
+            self._impl = _AlertStoreImpl('sqlite', db_path=db_path)
+        elif backend == 'redis':
+            self._impl = _AlertStoreImpl('redis', redis_url=REDIS_URL, key_prefix=REDIS_KEY_PREFIX)
+        elif backend == 'timescale':
+            self._impl = _AlertStoreImpl('timescale', connection_string=TIMESCALE_CONNECTION_STRING)
+        else:  # memory (default)
+            self._impl = _AlertStoreImpl('memory')
 
     def store_alert(self, alert: Dict[str, Any]) -> str:
         return self._impl.store_alert(alert)
@@ -150,33 +165,9 @@ def send_slack(alert: Dict[str, Any]):
 
 
 def alert(alert_obj: Dict[str, Any]):
-    """Legacy alert function - now also stores in database."""
-    # Classify severity if not set
-    if 'severity' not in alert_obj:
-        anomalies = alert_obj.get('anomalies', [])
-        alert_obj['severity'] = classify_severity(anomalies)
-
-    # Store in database if it has the required fields
-    if all(key in alert_obj for key in ['endpoint', 'severity', 'anomalous_metrics', 'explanation']):
-        try:
-            store_alerts([alert_obj])
-        except Exception:
-            pass  # Fall back to legacy behavior
-
-    # Legacy behavior
-    send_console(alert_obj)
-
-    # persist alert for offline analysis (legacy)
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(ALERTS_FILE, 'a', encoding='utf-8') as fh:
-            fh.write(json.dumps(alert_obj) + '\n')
-    except Exception:
-        pass
-
-    # try slack
-    ok = send_slack(alert_obj)
-    return ok
+    """Intelligent alert function with deduplication, cool-down, and multi-channel routing."""
+    from .alert_manager import process_alert
+    return process_alert(alert_obj)
 
 
 # FastAPI Application

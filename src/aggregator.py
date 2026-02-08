@@ -1,169 +1,214 @@
-"""Aggregator module.
+"""Rolling Metrics Aggregator.
 
-This module implements a pure function `aggregate_logs` that converts a list
-of raw API log records into time-windowed aggregated metrics. It uses only
-the Python standard library and contains no I/O side effects.
+This module implements a RollingMetricsAggregator class that maintains
+time-windowed metrics for API endpoints in memory using rolling windows.
 
 Public API:
-    aggregate_logs(logs: list[dict], window_seconds: int) -> dict
+    RollingMetricsAggregator: Class to aggregate metrics in real-time.
 
-Return format:
-    {
-        endpoint1: {
-            window_start_iso: {metrics...},
-            ...
-        },
-        endpoint2: { ... }
-    }
-
-Metrics returned per window:
+Metrics tracked per window:
     - avg_latency (float, ms)
+    - p50_latency (float, ms)
     - p95_latency (float, ms)
+    - p99_latency (float, ms)
     - error_rate (float, fraction)
-    - request_count (int)
+    - request_volume (int)
 
-Supported windows: 60 (1m), 300 (5m)
+Supported windows: 60s (1m), 300s (5m), 900s (15m)
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Dict, List, Any, Optional, Deque
 from datetime import datetime, timezone
-from collections import defaultdict
+from collections import defaultdict, deque
 import math
 
 
-def _parse_timestamp(ts: Any) -> Optional[datetime]:
-    """Parse timestamp from ISO string or numeric epoch to naive UTC datetime.
+class RollingMetricsAggregator:
+    """Maintains rolling window metrics for API endpoints."""
 
-    Returns None on parse failure.
-    """
-    if ts is None:
-        return None
-    try:
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(float(ts), tz=timezone.utc).replace(tzinfo=None)
-        if isinstance(ts, str):
-            s = ts.strip()
-            # Accept Z suffix
-            if s.endswith('Z'):
-                s = s[:-1] + '+00:00'
-            # Use fromisoformat which supports offset
-            dt = datetime.fromisoformat(s)
-            # normalize to naive UTC
-            if dt.tzinfo is not None:
-                return dt.astimezone(timezone.utc).replace(tzinfo=None)
-            return dt
-    except Exception:
-        return None
+    WINDOWS = [60, 300, 900]  # seconds
 
+    def __init__(self):
+        # endpoint -> window_sec -> deque of (timestamp, latency, status)
+        self.data: Dict[str, Dict[int, Deque[tuple]]] = defaultdict(lambda: defaultdict(deque))
 
-def _safe_get_number(v: Any) -> Optional[float]:
-    try:
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        # attempt to parse numeric string
-        return float(str(v).strip())
-    except Exception:
-        return None
+    def add_log(self, log: Dict[str, Any]) -> None:
+        """Add a log entry to the aggregator."""
+        parsed = self._parse_log(log)
+        if not parsed:
+            return
 
+        endpoint, timestamp, latency, status = parsed
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-def aggregate_logs(logs: List[Dict[str, Any]], window_seconds: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Aggregate raw API logs into metrics per endpoint and time window.
+        for window_sec in self.WINDOWS:
+            dq = self.data[endpoint][window_sec]
+            dq.append((timestamp, latency, status))
+            # Clean old entries
+            cutoff = now.timestamp() - window_sec
+            while dq and dq[0][0].timestamp() < cutoff:
+                dq.popleft()
 
-    Args:
-        logs: list of dicts with fields: endpoint (str), latency_ms (number),
-              status_code (int), timestamp (ISO string or epoch)
-        window_seconds: window size in seconds (supported: 60, 300)
+    def get_metrics(self, endpoint: Optional[str] = None) -> Dict[str, Any]:
+        """Get current metrics for endpoint(s)."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = {}
 
-    Returns:
-        Nested dict mapping endpoint -> window_start_iso -> metrics dict.
+        endpoints = [endpoint] if endpoint else list(self.data.keys())
 
-    Notes:
-        - Malformed records are skipped.
-        - Pure function: no I/O performed.
-    """
-    if window_seconds not in (60, 300):
-        raise ValueError('Unsupported window_seconds; supported: 60, 300')
+        for ep in endpoints:
+            if ep not in self.data:
+                continue
+            result[ep] = {}
+            for window_sec in self.WINDOWS:
+                dq = self.data[ep][window_sec]
+                # Clean before computing
+                cutoff = now.timestamp() - window_sec
+                while dq and dq[0][0].timestamp() < cutoff:
+                    dq.popleft()
+                if not dq:
+                    continue
+                metrics = self._compute_metrics(dq)
+                window_name = f"window_{window_sec//60}m"
+                result[ep][window_name] = metrics
 
-    groups: Dict[str, Dict[int, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        return result
 
-    for rec in logs:
+    def _parse_log(self, log: Dict[str, Any]) -> Optional[tuple]:
+        """Parse log entry."""
         try:
-            endpoint = rec.get('endpoint')
+            endpoint = log.get('endpoint')
             if not endpoint or not isinstance(endpoint, str):
-                continue
+                return None
 
-            ts = _parse_timestamp(rec.get('timestamp'))
-            if ts is None:
-                continue
+            ts = log.get('timestamp')
+            if isinstance(ts, str):
+                if ts.endswith('Z'):
+                    ts = ts[:-1] + '+00:00'
+                timestamp = datetime.fromisoformat(ts)
+            elif isinstance(ts, (int, float)):
+                timestamp = datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+            else:
+                return None
 
-            latency = _safe_get_number(rec.get('latency_ms'))
-            if latency is None or latency < 0:
-                continue
+            latency = log.get('latency_ms')
+            if not isinstance(latency, (int, float)) or latency < 0:
+                return None
 
-            status = rec.get('status_code')
-            try:
-                status = int(status)
-            except Exception:
-                continue
+            status = log.get('status_code')
+            if not isinstance(status, int):
+                return None
 
-            epoch = int(ts.timestamp())
-            bucket_start = (epoch // window_seconds) * window_seconds
-
-            groups[endpoint][bucket_start].append({'latency': latency, 'status': status})
+            return endpoint, timestamp, float(latency), status
         except Exception:
-            # Defensive: skip any unexpected record
-            continue
+            return None
 
-    result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    def _compute_metrics(self, dq: Deque[tuple]) -> Dict[str, Any]:
+        """Compute metrics from deque of (timestamp, latency, status)."""
+        latencies = [lat for _, lat, _ in dq]
+        statuses = [stat for _, _, stat in dq]
 
-    for endpoint, buckets in groups.items():
-        result[endpoint] = {}
-        for bucket_start, items in buckets.items():
-            latencies = [it['latency'] for it in items]
-            count = len(latencies)
-            if count == 0:
-                continue
-            avg_latency = sum(latencies) / count
+        if not latencies:
+            return {}
 
-            # p95 calculation: nearest-rank method
-            sorted_lat = sorted(latencies)
-            rank = math.ceil(0.95 * count)
-            p95_latency = sorted_lat[max(0, min(rank - 1, count - 1))]
+        count = len(latencies)
+        avg_latency = sum(latencies) / count
 
-            error_count = sum(1 for it in items if int(it['status']) >= 400)
-            error_rate = error_count / count
+        sorted_lat = sorted(latencies)
+        p50 = self._percentile(sorted_lat, 0.50)
+        p95 = self._percentile(sorted_lat, 0.95)
+        p99 = self._percentile(sorted_lat, 0.99)
 
-            window_iso = datetime.fromtimestamp(bucket_start, tz=timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
+        error_count = sum(1 for s in statuses if s >= 400)
+        error_rate = error_count / count if count > 0 else 0
 
-            result[endpoint][window_iso] = {
-                'avg_latency': round(avg_latency, 2),
-                'p95_latency': round(float(p95_latency), 2),
-                'error_rate': round(error_rate, 4),
-                'request_count': count,
-                'window_start': window_iso,
-                'window_seconds': window_seconds,
+        return {
+            'avg_latency': round(avg_latency, 2),
+            'p50_latency': round(p50, 2),
+            'p95_latency': round(p95, 2),
+            'p99_latency': round(p99, 2),
+            'error_rate': round(error_rate, 4),
+            'request_volume': count,
+        }
+
+    @staticmethod
+    def _percentile(sorted_list: List[float], p: float) -> float:
+        """Compute percentile from sorted list."""
+        n = len(sorted_list)
+        if n == 0:
+            return 0
+        rank = (n - 1) * p
+        lower = int(rank)
+        upper = min(lower + 1, n - 1)
+        weight = rank - lower
+        return sorted_list[lower] * (1 - weight) + sorted_list[upper] * weight
+
+
+# For backward compatibility
+def compute_aggregates(now=None):
+    """Compute aggregates using rolling aggregator."""
+    import os
+    import json
+    from datetime import datetime, timezone
+
+    BASE_DIR = os.path.dirname(__file__)
+    DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, '..', 'data'))
+    RAW_LOGS = os.path.join(DATA_DIR, 'raw_logs.jsonl')
+
+    now = now or datetime.now(timezone.utc)
+    
+    agg = RollingMetricsAggregator()
+    
+    # Load existing logs
+    if os.path.exists(RAW_LOGS):
+        with open(RAW_LOGS, 'r', encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    log = json.loads(line)
+                    agg.add_log(log)
+                except Exception:
+                    continue
+    
+    # Get metrics
+    metrics = agg.get_metrics()
+    
+    # Flatten
+    results = []
+    for endpoint, windows in metrics.items():
+        for window_name, mets in windows.items():
+            window_min = int(window_name.split('_')[1][:-1])
+            rec = {
+                'endpoint': endpoint,
+                'window': f'{window_min}m',
+                'avg_latency': mets['avg_latency'],
+                'p95_latency': mets['p95_latency'],
+                'error_rate': mets['error_rate'],
+                'request_volume': mets['request_volume'],
+                'response_var': 0.0,
+                'timestamp': now.isoformat().replace('+00:00', 'Z')
             }
-
-    return result
+            results.append(rec)
+    
+    return results
 
 
 if __name__ == '__main__':
     # Example usage
-    sample_logs = [
-        {'endpoint': '/checkout', 'latency_ms': 120, 'status_code': 200, 'timestamp': '2026-02-02T15:00:05Z'},
-        {'endpoint': '/checkout', 'latency_ms': 500, 'status_code': 500, 'timestamp': '2026-02-02T15:00:30Z'},
-        {'endpoint': '/checkout', 'latency_ms': 110, 'status_code': 200, 'timestamp': '2026-02-02T15:01:00Z'},
-        {'endpoint': '/login', 'latency_ms': 80, 'status_code': 200, 'timestamp': '2026-02-02T15:00:10Z'},
+    agg = RollingMetricsAggregator()
+
+    # Add some logs
+    logs = [
+        {'endpoint': '/checkout', 'latency_ms': 120, 'status_code': 200, 'timestamp': '2026-02-07T10:00:00Z'},
+        {'endpoint': '/checkout', 'latency_ms': 500, 'status_code': 500, 'timestamp': '2026-02-07T10:00:30Z'},
+        {'endpoint': '/login', 'latency_ms': 80, 'status_code': 200, 'timestamp': '2026-02-07T10:00:10Z'},
     ]
 
-    print('Aggregate (1m):')
-    out1 = aggregate_logs(sample_logs, 60)
-    from pprint import pprint
+    for log in logs:
+        agg.add_log(log)
 
-    pprint(out1)
-
-    print('\nAggregate (5m):')
-    pprint(aggregate_logs(sample_logs, 300))
+    import pprint
+    pprint.pprint(agg.get_metrics())
 

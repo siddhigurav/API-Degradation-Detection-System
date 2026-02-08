@@ -2,17 +2,22 @@
 
 Converts an alert object into a concise, human-readable explanation.
 
+Generates decision-grade narratives that engineers can act on, including:
+- Specific metric changes with percentages and time ranges
+- Confidence scores from drift analysis
+- Primary drivers of degradation
+- Clear time windows and durations
+
 Public API:
     explain(alert: dict) -> str
-
-The function programmatically summarises which metrics changed, the
-magnitude of change, the time window, and why the combination of signals
-likely indicates degradation.
+    explain_alerts(alerts) -> list[dict]  # with explanation, insights, recommendations
 
 No ML, no persistence. Pure Python, deterministic output.
 """
 
 from typing import Dict, Any, List
+from datetime import datetime, timezone
+import math
 
 
 def _fmt_percent(delta: float) -> str:
@@ -28,12 +33,76 @@ def _fmt_fold(baseline: float, current: float) -> str:
         return "?"
 
 
-def explain(alert: Dict[str, Any]) -> str:
-    """Generate a human-readable explanation for `alert`.
+def _fmt_duration_minutes(start: str, end: str) -> str:
+    """Calculate and format duration between ISO timestamps in minutes."""
+    try:
+        start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+        end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+        duration_minutes = (end_dt - start_dt).total_seconds() / 60
+        if duration_minutes < 1:
+            return f"{duration_minutes * 60:.0f} seconds"
+        elif duration_minutes < 60:
+            return f"{duration_minutes:.0f} minutes"
+        else:
+            hours = duration_minutes / 60
+            return f"{hours:.1f} hours"
+    except:
+        return "recent period"
 
-    The function expects `alert` to contain `endpoint`, `severity`,
-    `signals` (list of anomaly dicts with metric_name, baseline_value,
-    current_value, deviation_ratio), and optional `window_start`/`window_end`.
+
+def _calculate_change_percentage(baseline: float, current: float) -> float:
+    """Calculate percentage change from baseline to current."""
+    if baseline == 0:
+        return float('inf') if current > 0 else 0.0
+    return ((current - baseline) / baseline)
+
+
+def _get_primary_driver(signals: List[Dict[str, Any]]) -> str:
+    """Identify the primary driver of the degradation."""
+    # Sort by deviation ratio to find the most anomalous metric
+    sorted_signals = sorted(signals, key=lambda s: abs(s.get('deviation_ratio', 0)), reverse=True)
+    if not sorted_signals:
+        return "multiple metrics"
+
+    primary = sorted_signals[0]['metric_name']
+
+    # Map to readable names
+    if primary == 'avg_latency':
+        return "average latency"
+    elif primary == 'p95_latency':
+        return "95th percentile latency"
+    elif primary == 'error_rate':
+        return "error rate"
+    elif primary == 'request_volume':
+        return "request volume"
+    else:
+        return primary.replace('_', ' ')
+
+
+def _get_confidence_description(drift_context: Dict[str, Any]) -> str:
+    """Generate confidence description from drift scores."""
+    latency_score = drift_context.get('latency_drift_score', 0)
+    error_score = drift_context.get('error_drift_score', 0)
+    max_score = max(latency_score, error_score)
+
+    if max_score > 0.8:
+        return "high confidence"
+    elif max_score > 0.5:
+        return "moderate confidence"
+    elif max_score > 0.2:
+        return "low confidence"
+    else:
+        return "uncertain"
+
+
+def explain(alert: Dict[str, Any]) -> str:
+    """Generate a human-readable, decision-grade explanation for an alert.
+
+    Creates narrative explanations like:
+    "Latency for /login increased by 37% over 15 minutes, primarily driven by p95 latency drift.
+     Error rate also increased from 0.2% → 1.4%."
+
+    Uses templates based on signal combinations and includes confidence scores.
     """
     if not alert or not isinstance(alert, dict):
         return "No alert information provided."
@@ -42,90 +111,93 @@ def explain(alert: Dict[str, Any]) -> str:
     severity = alert.get("severity", "UNKNOWN")
     window_start = alert.get("window_start")
     window_end = alert.get("window_end")
+    signals = list(alert.get("signals") or [])
+    drift_context = alert.get("drift_context", {})
+    signal_types = alert.get("signal_types", {})
 
-    if window_start and window_end:
-        time_phrase = f"between {window_start} and {window_end}"
-    elif window_start:
-        time_phrase = f"starting at {window_start}"
-    else:
-        time_phrase = "in the recent window"
-
-    signals: List[Dict[str, Any]] = list(alert.get("signals") or [])
     if not signals:
-        return f"{severity} alert for {endpoint} {time_phrase} — no signal details available."
+        return f"{severity} alert for {endpoint} — no signal details available."
 
-    metric_names = []
-    parts: List[str] = []
-    reasons: List[str] = []
+    # Calculate time duration
+    duration = "recent period"
+    if window_start and window_end:
+        duration = _fmt_duration_minutes(window_start, window_end)
 
-    for s in signals:
-        m = s.get("metric_name", "metric")
-        metric_names.append(m)
-        baseline = s.get("baseline_value")
-        current = s.get("current_value")
-        dev = s.get("deviation_ratio")
+    # Get confidence description
+    confidence = _get_confidence_description(drift_context)
 
-        mag = ""
-        if baseline is not None and current is not None:
-            if "error" in m or "rate" in m:
-                try:
-                    fold = _fmt_fold(float(baseline), float(current))
-                    pct = _fmt_percent(float(dev)) if dev is not None else ""
-                    mag = f"error rate rose from {baseline:.3f} to {current:.3f} ({fold}, {pct})"
-                except Exception:
-                    mag = "error rate increased"
-            else:
-                try:
-                    pct = _fmt_percent(float(dev)) if dev is not None else ""
-                    mag = f"from {baseline:.1f} to {current:.1f} ({pct})"
-                except Exception:
-                    mag = "changed noticeably"
-        else:
-            if dev is not None:
-                try:
-                    mag = f"changed by {_fmt_percent(float(dev))}"
-                except Exception:
-                    mag = "changed noticeably"
-            else:
-                mag = f"{s.get('severity', 'changed')}"
+    # Build explanation based on signal types
+    explanation_parts = []
 
-        parts.append(f"{m} {mag}")
+    # Handle latency signals
+    latency_signals = [s for s in signals if s.get('metric_name') in ['avg_latency', 'p95_latency']]
+    if latency_signals:
+        primary_latency = _get_primary_driver(latency_signals)
+        latency_changes = []
 
-        if m in ("avg_latency", "p95_latency") or "latency" in m:
-            reasons.append("increased latency affects user experience")
-        if "error" in m or "status" in m or "fail" in m:
-            reasons.append("higher error rate causes failed requests")
+        for signal in latency_signals:
+            baseline = signal.get('baseline_value')
+            current = signal.get('current_value')
+            if baseline is not None and current is not None:
+                pct_change = _calculate_change_percentage(baseline, current)
+                if abs(pct_change) > 0.01:  # Only show significant changes
+                    direction = "increased" if pct_change > 0 else "decreased"
+                    latency_changes.append(f"{signal['metric_name'].replace('_', ' ')} {direction} by {_fmt_percent(abs(pct_change))}")
 
-    metrics_phrase = ", ".join(metric_names)
-    details = "; ".join(parts)
-    reason_phrase = " and ".join(sorted(set(reasons))) if reasons else "multiple signals indicate a problem"
+        if latency_changes:
+            explanation_parts.append(f"Latency for {endpoint} {', '.join(latency_changes)} over {duration}")
 
-    explanation = (
-        f"{severity} alert for {endpoint} {time_phrase}: {metrics_phrase} changed ({details}). "
-        f"This likely indicates degradation because {reason_phrase}."
-    )
+            # Add primary driver if multiple latency metrics
+            if len(latency_signals) > 1:
+                primary_driver = _get_primary_driver(latency_signals)
+                explanation_parts[-1] += f", primarily driven by {primary_driver} drift"
+
+    # Handle error signals
+    error_signals = [s for s in signals if s.get('metric_name') == 'error_rate']
+    if error_signals:
+        for signal in error_signals:
+            baseline = signal.get('baseline_value')
+            current = signal.get('current_value')
+            if baseline is not None and current is not None:
+                pct_change = _calculate_change_percentage(baseline, current)
+                if abs(pct_change) > 0.01:
+                    direction = "increased" if pct_change > 0 else "decreased"
+                    baseline_pct = baseline * 100
+                    current_pct = current * 100
+                    explanation_parts.append(f"Error rate {direction} from {baseline_pct:.1f}% → {current_pct:.1f}%")
+
+    # Handle traffic signals
+    traffic_signals = [s for s in signals if s.get('metric_name') == 'request_volume']
+    if traffic_signals:
+        for signal in traffic_signals:
+            baseline = signal.get('baseline_value')
+            current = signal.get('current_value')
+            if baseline is not None and current is not None:
+                pct_change = _calculate_change_percentage(baseline, current)
+                if abs(pct_change) > 0.01:
+                    direction = "increased" if pct_change > 0 else "decreased"
+                    explanation_parts.append(f"Request volume {direction} by {_fmt_percent(abs(pct_change))}")
+
+    # Combine parts into final explanation
+    if explanation_parts:
+        main_explanation = ". ".join(explanation_parts)
+        explanation = f"{main_explanation}."
+    else:
+        explanation = f"{severity} alert for {endpoint} over {duration} with {confidence}."
+
+    # Add confidence if we have drift context
+    if drift_context and any(drift_context.values()):
+        explanation += f" ({confidence})"
 
     return explanation
 
-
-if __name__ == "__main__":
-    example = {
-        "endpoint": "/checkout",
-        "severity": "HIGH",
-        "signals": [
-            {"metric_name": "avg_latency", "baseline_value": 100.0, "current_value": 220.0, "deviation_ratio": 1.2},
-            {"metric_name": "error_rate", "baseline_value": 0.005, "current_value": 0.02, "deviation_ratio": 3.0},
-        ],
-        "window_start": "2026-02-02T15:00:00Z",
-        "window_end": "2026-02-02T15:01:00Z",
-    }
-
-    print(explain(example))
 def explain_alerts(alerts: Any) -> List[Dict[str, Any]]:
     """Produce explanations, insights and recommendations for alert(s).
 
     Accepts either a single alert dict or a list of alerts. Each returned
     item is a dict with `explanation`, `insights`, and `recommendations`.
+
+    Enhanced to provide decision-grade narratives with specific actions.
     """
     if alerts is None:
         return []
@@ -143,36 +215,136 @@ def explain_alerts(alerts: Any) -> List[Dict[str, Any]]:
         insights: List[str] = []
         recommendations: List[str] = []
 
-        for s in raw_signals:
-            name = (s.get("metric_name") or s.get("metric") or "").lower()
+        signal_types = a.get("signal_types", {})
+        drift_context = a.get("drift_context", {})
 
-            if "latency" in name:
-                insights.append("increased latency impacting user experience")
-                recommendations.append("investigate backend performance and slow queries")
+        # Generate insights based on signal types and drift context
+        if signal_types.get("has_latency"):
+            latency_score = drift_context.get('latency_drift_score', 0)
+            if latency_score > 0.5:
+                insights.append("Sustained latency degradation indicates performance regression")
+            else:
+                insights.append("Latency increase affecting user experience")
 
-            if "error" in name or "status" in name or "fail" in name:
-                insights.append("higher error rate causing failed requests")
-                recommendations.append("check recent deployments and error logs")
+        if signal_types.get("has_error"):
+            error_score = drift_context.get('error_drift_score', 0)
+            if error_score > 0.5:
+                insights.append("Error rate trend suggests systemic issues")
+            else:
+                insights.append("Rising error rate causing failed requests")
 
-            if "volume" in name or "request" in name:
-                insights.append("traffic volume changed")
-                recommendations.append("verify traffic sources and apply rate limiting if needed")
+        if signal_types.get("has_traffic"):
+            insights.append("Traffic pattern changes may indicate external factors")
 
-            if "response" in name or "variance" in name or "size" in name:
-                insights.append("response size variance changed")
-                recommendations.append("inspect payloads and caching behavior")
+        # Generate specific recommendations
+        if signal_types.get("has_latency") and signal_types.get("has_error"):
+            recommendations.append("Check recent deployments and database performance")
+            recommendations.append("Review error logs for root cause patterns")
+            recommendations.append("Consider rolling back recent changes")
+
+        elif signal_types.get("has_latency"):
+            recommendations.append("Profile application code for performance bottlenecks")
+            recommendations.append("Check database query performance and indexes")
+            recommendations.append("Monitor resource utilization (CPU, memory, disk)")
+
+        elif signal_types.get("has_error"):
+            recommendations.append("Examine application logs for error patterns")
+            recommendations.append("Check external service dependencies")
+            recommendations.append("Verify configuration changes")
+
+        if not recommendations:
+            recommendations.append("Monitor the system closely and gather more diagnostic data")
+
+        # Add time-based recommendations
+        window_start = a.get("window_start")
+        if window_start:
+            try:
+                alert_time = datetime.fromisoformat(window_start.replace('Z', '+00:00'))
+                now = datetime.now(timezone.utc)
+                time_since_alert = (now - alert_time).total_seconds() / 3600  # hours
+
+                if time_since_alert < 1:
+                    recommendations.insert(0, "URGENT: Investigate immediately - degradation just started")
+                elif time_since_alert < 4:
+                    recommendations.insert(0, "Investigate within next hour - degradation ongoing")
+            except:
+                pass
 
         # Deduplicate while preserving order
-        insights = list(dict.fromkeys(insights)) or ["no specific insights"]
-        recommendations = list(dict.fromkeys(recommendations)) or ["monitor the system and gather more data"]
+        insights = list(dict.fromkeys(insights)) or ["Performance degradation detected"]
+        recommendations = list(dict.fromkeys(recommendations)) or ["Monitor the system and gather more data"]
 
-        results.append({
+        # Create result dict with original alert fields plus explanations
+        result = dict(a)  # Copy all original fields
+        result.update({
             "explanation": explanation,
             "insights": insights,
             "recommendations": recommendations,
         })
 
+        results.append(result)
+
     return results
+
+
+    return explanation
+
+
+if __name__ == "__main__":
+    # Test the enhanced explainer with a realistic alert
+    example = {
+        "endpoint": "/checkout",
+        "severity": "HIGH",
+        "signals": [
+            {
+                "metric_name": "avg_latency",
+                "baseline_value": 100.0,
+                "current_value": 220.0,
+                "deviation_ratio": 1.2,
+                "z_score": 3.5
+            },
+            {
+                "metric_name": "p95_latency",
+                "baseline_value": 150.0,
+                "current_value": 350.0,
+                "deviation_ratio": 1.33,
+                "z_score": 4.2
+            },
+            {
+                "metric_name": "error_rate",
+                "baseline_value": 0.005,
+                "current_value": 0.025,
+                "deviation_ratio": 4.0,
+                "z_score": 5.1
+            },
+        ],
+        "window_start": "2026-02-02T15:00:00Z",
+        "window_end": "2026-02-02T15:15:00Z",
+        "drift_context": {
+            "latency_drift_score": 0.85,
+            "error_drift_score": 0.72,
+            "traffic_anomaly_score": 0.1,
+            "is_sustained_degradation": True
+        },
+        "signal_types": {
+            "has_latency": True,
+            "has_error": True,
+            "has_traffic": False
+        }
+    }
+
+    print("ENHANCED EXPLANATION ENGINE")
+    print("=" * 50)
+    explained = explain_alerts(example)
+    result = explained[0]
+
+    print(f"EXPLANATION: {result['explanation']}")
+    print("\nINSIGHTS:")
+    for insight in result['insights']:
+        print(f"• {insight}")
+    print("\nRECOMMENDATIONS:")
+    for rec in result['recommendations']:
+        print(f"• {rec}")
 
 
 if __name__ == "__main__":

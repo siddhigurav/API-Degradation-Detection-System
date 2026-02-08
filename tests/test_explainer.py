@@ -18,11 +18,13 @@ def test_explain_basic():
         ],
         "window_start": "2026-02-02T15:00:00Z",
         "window_end": "2026-02-02T15:01:00Z",
+        "drift_context": {"latency_drift_score": 0.6, "error_drift_score": 0.4},
+        "signal_types": {"has_latency": True, "has_error": True, "has_traffic": False}
     }
 
     text = explain(alert)
     assert "/checkout" in text
-    assert "avg_latency" in text
-    assert "error rate" in text or "error_rate" in text
-    assert "between 2026-02-02T15:00:00Z and 2026-02-02T15:01:00Z" in text
-    assert "likely indicates degradation" in text
+    assert "increased by 120.0%" in text or "increased by 120%" in text
+    assert "Error rate increased from 0.5% → 2.0%" in text
+    assert "1 minutes" in text or "over" in text
+    assert "moderate confidence" in text

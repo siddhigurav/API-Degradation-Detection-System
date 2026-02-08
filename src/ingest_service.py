@@ -4,6 +4,11 @@ from typing import Optional, List
 import os
 import json
 from datetime import datetime
+import asyncio
+
+from aggregator import RollingMetricsAggregator
+from storage.metrics_store import InMemoryMetricsStorage
+from detector import update_baselines
 
 app = FastAPI(title="EWS API Service")
 
@@ -14,6 +19,83 @@ AGG_LOGS = os.path.join(DATA_DIR, 'aggregates.jsonl')
 ALERTS_FILE = os.path.join(DATA_DIR, 'alerts.jsonl')
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Global aggregator instance
+aggregator = RollingMetricsAggregator()
+
+# Global metrics storage
+metrics_store = InMemoryMetricsStorage()
+
+# Load existing logs into aggregator at startup
+def load_existing_logs():
+    if os.path.exists(RAW_LOGS):
+        with open(RAW_LOGS, 'r', encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    log = json.loads(line)
+                    aggregator.add_log(log)
+                except Exception:
+                    continue
+
+load_existing_logs()
+
+# Background task to store metrics periodically
+async def store_metrics_periodically():
+    while True:
+        try:
+            metrics = aggregator.get_metrics()
+            # Flatten to list of dicts
+            flattened = []
+            now = datetime.utcnow()
+            for endpoint, windows in metrics.items():
+                for window_name, mets in windows.items():
+                    window_min = int(window_name.split('_')[1][:-1])
+                    rec = {
+                        'endpoint': endpoint,
+                        'window_minutes': window_min,
+                        'timestamp': now,
+                        'avg_latency': mets['avg_latency'],
+                        'p50_latency': mets['p50_latency'],
+                        'p95_latency': mets['p95_latency'],
+                        'p99_latency': mets['p99_latency'],
+                        'error_rate': mets['error_rate'],
+                        'request_volume': mets['request_volume'],
+                    }
+                    flattened.append(rec)
+            
+            if flattened:
+                metrics_store.store_metrics(flattened)
+                
+                # Update baselines with new metrics
+                # Convert flattened metrics to the format expected by update_baselines
+                current_metrics_for_baselines = {}
+                for rec in flattened:
+                    endpoint = rec['endpoint']
+                    window_minutes = rec['window_minutes']
+                    # Use a synthetic window_start key
+                    window_key = f"window_{window_minutes}m"
+                    
+                    if endpoint not in current_metrics_for_baselines:
+                        current_metrics_for_baselines[endpoint] = {}
+                    
+                    current_metrics_for_baselines[endpoint][window_key] = {
+                        'avg_latency': rec['avg_latency'],
+                        'p95_latency': rec['p95_latency'],
+                        'error_rate': rec['error_rate']
+                    }
+                
+                update_baselines(current_metrics_for_baselines)
+                
+        except Exception as e:
+            print(f"Error storing metrics: {e}")
+        
+        await asyncio.sleep(60)  # Store every minute
+
+# Start background task
+asyncio.create_task(store_metrics_periodically())
 
 class LogEntry(BaseModel):
     timestamp: Optional[str] = Field(None, description="ISO8601 timestamp. If omitted server time will be used.")
@@ -72,13 +154,25 @@ async def get_alert(alert_id: int):
     
     return alert
 
-@app.get('/metrics/{endpoint}', response_model=List[dict])
-async def get_metrics(endpoint: str, window: Optional[int] = Query(None, description="Filter by window minutes: 1, 5, 15")):
-    aggregates = read_jsonl(AGG_LOGS)
-    metrics = [a for a in aggregates if a.get('endpoint') == endpoint]
-    if window:
-        metrics = [m for m in metrics if m.get('window_minutes') == window]
-    return metrics
+@app.get('/metrics')
+async def get_all_metrics():
+    metrics = aggregator.get_metrics()
+    # Flatten to list of dicts like compute_aggregates
+    result = []
+    for endpoint, windows in metrics.items():
+        for window_name, mets in windows.items():
+            window_min = int(window_name.split('_')[1][:-1])  # e.g. window_1m -> 1
+            rec = {
+                'endpoint': endpoint,
+                'window': f'{window_min}m',
+                'avg_latency': mets['avg_latency'],
+                'p95_latency': mets['p95_latency'],
+                'error_rate': mets['error_rate'],
+                'request_volume': mets['request_volume'],
+                'timestamp': datetime.utcnow().isoformat().replace('+00:00', 'Z')
+            }
+            result.append(rec)
+    return result
 
 @app.post('/ingest')
 async def ingest(log: LogEntry):
@@ -88,6 +182,8 @@ async def ingest(log: LogEntry):
     try:
         with open(RAW_LOGS, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps(record) + '\n')
+        # Add to aggregator
+        aggregator.add_log(record)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"failed to write log: {e}")
     return {"status": "ok"}

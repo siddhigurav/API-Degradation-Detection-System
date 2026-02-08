@@ -12,7 +12,7 @@ def test_store_and_get_alert():
     fd, path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     try:
-        store = AlertStore(path)
+        store = AlertStore('sqlite', db_path=path)
         alert = {
             'endpoint': '/checkout',
             'severity': 'CRITICAL',
