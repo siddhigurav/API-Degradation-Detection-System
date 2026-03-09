@@ -1,11 +1,99 @@
-fastapi
-uvicorn[standard]
-pandas
-numpy
-scikit-learn
-httpx
-python-dotenv
-streamlit
-matplotlib
-seaborn
-flask
+# API Degradation Detection System - Production Requirements
+
+# Core Framework & API
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Streaming & Messaging
+kafka-python==2.0.2
+confluent-kafka==1.7.0
+redis==5.0.1
+
+# Data Processing & ML
+pandas==2.1.3
+numpy==1.26.2
+scikit-learn==1.3.2
+scipy==1.11.4
+polars==0.19.12
+
+# Deep Learning Models
+tensorflow==2.14.0
+torch==2.0.1
+pytorch-lightning==2.0.9
+
+# Time Series & Prophet
+statsmodels==0.14.0
+fbprophet==0.7.10
+
+# Causal Inference & RCA
+dowhy==0.11.1
+networkx==3.2
+pygraphviz==1.11
+
+# Database Clients
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.23
+timescaledb-sqlalchemy==0.2.0
+asyncpg==0.29.0
+sqlalchemy-asyncio==0.29.0
+
+# HTTP Client & Webhooks
+httpx==0.25.2
+requests==2.31.0
+aiohttp==3.9.1
+
+# Monitoring & Observability
+prometheus-client==0.19.0
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-exporter-jaeger==1.21.0
+opentelemetry-exporter-prometheus==0.42b0
+python-json-logger==2.0.7
+
+# Logging & Debugging
+structlog==23.2.0
+loguru==0.7.2
+python-dotenv==1.0.0
+
+# Configuration Management
+PyYAML==6.0.1
+toml==0.10.2
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-benchmark==4.0.0
+pytest-xdist==3.5.0
+hypothesis==6.88.4
+
+# Mocking & Fixtures
+pytest-mock==3.12.0
+responses==0.24.1
+fakeredis==2.20.0
+
+# Code Quality
+black==23.12.0
+isort==5.13.2
+flake8==6.1.0
+mypy==1.7.1
+pylint==3.0.3
+
+# Documentation
+mkdocs==1.5.3
+mkdocs-material==9.4.14
+
+# Performance & Profiling
+memory-profiler==0.61.0
+py-spy==0.3.14
+scalene==1.5.39.2
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+tzlocal==5.2
+click==8.1.7
+tqdm==4.66.1
+tenacity==8.2.3

@@ -13,9 +13,8 @@ from typing import Dict, Any, List, Tuple
 import pandas as pd
 from datetime import datetime, timedelta
 from storage.baseline_store import get_baseline_store
-from config import STORAGE_BACKEND
 from storage.metrics_store import get_metrics_store
-from config import STORAGE_BACKEND
+from config import settings
 import numpy as np
 
 
@@ -128,7 +127,7 @@ def calculate_drift_confidence_scores(endpoint: str, aggregates: List[Dict[str, 
         window_minutes = int(latest_agg['window'][:-1])
 
         # Get historical metrics for trend analysis
-        metrics_store = get_metrics_store(STORAGE_BACKEND)
+        metrics_store = get_metrics_store(settings.STORAGE_BACKEND)
         print(f"DEBUG: Using metrics store: {id(metrics_store)}")
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=24)  # Look at last 24 hours to catch test data
@@ -328,8 +327,8 @@ def calculate_trend_metrics_from_df(hist_df: pd.DataFrame, metric_name: str) -> 
 
 def detect_consecutive_anomalies(endpoint: str, metric_name: str, window_minutes: int = 1, threshold_sigma: float = 2.0, min_consecutive: int = 3) -> Dict[str, Any]:
     """Detect consecutive anomalies indicating sustained degradation."""
-    metrics_store = get_metrics_store(STORAGE_BACKEND)
-    baseline_store = get_baseline_store(STORAGE_BACKEND)
+    metrics_store = get_metrics_store(settings.STORAGE_BACKEND)
+    baseline_store = get_baseline_store(settings.STORAGE_BACKEND)
 
     # Get recent metrics
     end_time = datetime.now()
@@ -378,7 +377,7 @@ def detect_consecutive_anomalies(endpoint: str, metric_name: str, window_minutes
 
 def compute_baselines(current_metrics: Dict[str, Any]) -> Dict[str, Any]:
     """Compute baseline statistics for all endpoints and metrics."""
-    baseline_store = get_baseline_store(STORAGE_BACKEND)
+    baseline_store = get_baseline_store(settings.STORAGE_BACKEND)
     baselines = {}
 
     for endpoint, window_data in current_metrics.items():
@@ -471,7 +470,7 @@ def detect_anomalies(current_metrics: Dict[str, Any], baseline_metrics: Dict[str
 
 def update_baselines(current_metrics: Dict[str, Any]) -> None:
     """Update baseline statistics with new observations."""
-    baseline_store = get_baseline_store(STORAGE_BACKEND)
+    baseline_store = get_baseline_store(settings.STORAGE_BACKEND)
 
     for endpoint, window_data in current_metrics.items():
         for window_start, metrics in window_data.items():
@@ -511,7 +510,7 @@ def compute_baselines(current_metrics: Dict[str, Dict[str, Dict[str, Any]]]) -> 
     Returns:
         Baseline metrics: endpoint -> metric_name -> {"mean": float, "std": float, "ewma": float, ...}
     """
-    store = get_baseline_store(STORAGE_BACKEND)
+    store = get_baseline_store(settings.STORAGE_BACKEND)
     baselines = {}
     
     for endpoint in current_metrics.keys():
@@ -598,7 +597,7 @@ def detect_consecutive_anomalies(endpoint: str, metric_name: str, window_minutes
     Returns info about consecutive anomalies if they exist.
     """
     from storage.metrics_store import InMemoryMetricsStorage
-    store = get_baseline_store(STORAGE_BACKEND)
+    store = get_baseline_store(settings.STORAGE_BACKEND)
     metrics_store = InMemoryMetricsStorage()
     
     # Get recent metrics
@@ -668,7 +667,7 @@ def update_baselines(current_metrics: Dict[str, Dict[str, Dict[str, Any]]]) -> N
     Args:
         current_metrics: endpoint -> window_iso -> metrics dict
     """
-    store = get_baseline_store(STORAGE_BACKEND)
+    store = get_baseline_store(settings.STORAGE_BACKEND)
     now = datetime.now()
     
     for endpoint, windows in current_metrics.items():

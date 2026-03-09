@@ -1,0 +1,68 @@
+# Global settings
+global:
+  scrape_interval: 15s      # Scrape interval
+  evaluation_interval: 15s  # Rule evaluation interval
+  external_labels:
+    cluster: 'api-degradation-detection'
+    environment: 'development'
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Rules files
+rule_files: []
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Mock API services (for testing)
+  - job_name: 'api-services'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['localhost:8001', 'localhost:8002', 'localhost:8003']
+        labels:
+          service: 'checkout-api'
+      - targets: ['localhost:8004', 'localhost:8005']
+        labels:
+          service: 'user-api'
+      - targets: ['localhost:8006']
+        labels:
+          service: 'payment-api'
+
+  # Kafka metrics
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka:9101']
+
+  # Node exporter (if running)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+
+  # Custom monitoring endpoints
+  - job_name: 'monitoring-services'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8100']  # Feature extraction service metrics
+        labels:
+          service: 'feature-engine'
+      - targets: ['localhost:8101']  # Detection service metrics
+        labels:
+          service: 'anomaly-detector'
+      - targets: ['localhost:8102']  # Correlation service metrics
+        labels:
+          service: 'correlator'
+      - targets: ['localhost:8103']  # RCA service metrics
+        labels:
+          service: 'rca-engine'
+      - targets: ['localhost:8104']  # Alert router metrics
+        labels:
+          service: 'alert-router'
