@@ -6,6 +6,10 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 
+# Authentication & Security
+PyJWT==2.11.0
+python-multipart==0.0.22
+
 # Streaming & Messaging
 kafka-python==2.0.2
 confluent-kafka==1.7.0

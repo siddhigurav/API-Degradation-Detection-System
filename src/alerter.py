@@ -14,7 +14,9 @@ import os
 import json
 import time
 import httpx
-from fastapi import FastAPI, HTTPException
+import jwt
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 # Import helpers with fallbacks so `src` can be added to PYTHONPATH for tests
@@ -168,6 +170,31 @@ def alert(alert_obj: Dict[str, Any]):
     """Intelligent alert function with deduplication, cool-down, and multi-channel routing."""
     from .alert_manager import process_alert
     return process_alert(alert_obj)
+
+
+# JWT Configuration
+SECRET_KEY = "your-secret-key-change-in-production"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+# Valid users (in production, use a proper database)
+VALID_USERS = {
+    "admin": "admin",
+    "user": "password"
+}
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create a JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
 
 # FastAPI Application
@@ -342,6 +369,25 @@ async def update_alert_status(alert_id: str, status: str):
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "API Degradation Detection - Alerting API"}
+
+
+@app.post("/auth/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    """
+    Authenticate user and return JWT token.
+    
+    Test credentials:
+    - username: admin, password: admin
+    - username: user, password: password
+    """
+    # Validate credentials
+    if username not in VALID_USERS or VALID_USERS[username] != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": username, "role": "admin"})
+    
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.get("/metrics/{endpoint}")
